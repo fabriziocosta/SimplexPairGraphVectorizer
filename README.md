@@ -160,4 +160,6 @@ graphs only when caching is disabled or refit afterward.
 
 Canonical feature payloads are serialized with `orjson` before BLAKE2b hashing.
 The package falls back to Python's standard JSON encoder if `orjson` cannot
-encode a value, including integers outside its supported range.
+encode a value, including integers outside its supported range. See
+[the hashing performance notes](docs/hashing-performance.md) for the benchmark
+against AbstractGraph-style SHA-256 hashing.
