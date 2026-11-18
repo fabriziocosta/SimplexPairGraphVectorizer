@@ -131,8 +131,12 @@ def sample_rooted_simplex_pair(
     random_attempts: int = 5000,
 ) -> RootedSimplexPair | None:
     """Choose a random valid rooted pair, allowing the two simplex sizes to differ."""
-    if distance not in (0, 1, 2):
-        raise ValueError("Rooted simplex-pair representative distance must be 0, 1, or 2 hops")
+    if not isinstance(distance, int) or distance < 0:
+        raise ValueError("distance must be a nonnegative integer")
+    # In a rooted pair, each representative is either the shared root or one
+    # edge away from it, so distances above two cannot occur.
+    if distance > 2:
+        return None
     by_root = cliques_by_root(graph, max_simplex_size)
     roots = list(by_root)
     if not roots:
@@ -344,3 +348,134 @@ def draw_protein_feature(
         },
     )
     return figure
+
+
+def display_feature_explorer(
+    project_root: str | Path,
+    *,
+    max_representative_distance: int = 6,
+    max_simplex_size: int = 4,
+):
+    """Display the widget-driven protein and rooted simplex-pair explorer."""
+    import ipywidgets as widgets
+    from IPython.display import Markdown, clear_output, display
+
+    if not isinstance(max_representative_distance, int) or max_representative_distance < 0:
+        raise ValueError("max_representative_distance must be a nonnegative integer")
+    if not isinstance(max_simplex_size, int) or max_simplex_size < 1:
+        raise ValueError("max_simplex_size must be at least one vertex")
+
+    proteins = load_available_proteins(project_root)
+    rng = random.Random()
+    state: dict[str, Any] = {
+        "row": None,
+        "graph": None,
+        "coordinates": None,
+        "feature": None,
+    }
+    plot_output = widgets.Output(layout=widgets.Layout(width="100%"))
+    protein_button = widgets.Button(description="Random protein", button_style="primary")
+    feature_button = widgets.Button(description="Random feature")
+    distance_slider = widgets.IntSlider(
+        value=min(1, max_representative_distance),
+        min=0,
+        max=max_representative_distance,
+        step=1,
+        description="Representative distance (hops)",
+        continuous_update=False,
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="48%"),
+    )
+    size_slider = widgets.IntSlider(
+        value=max_simplex_size,
+        min=1,
+        max=max_simplex_size,
+        step=1,
+        description="Maximum simplex size (vertices)",
+        continuous_update=False,
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="48%"),
+    )
+
+    def feature_title(row, feature: RootedSimplexPair) -> str:
+        graph = state["graph"]
+        left_label = ", ".join(str(graph.nodes[node].get("label", "?")) for node in feature.left)
+        right_label = ", ".join(str(graph.nodes[node].get("label", "?")) for node in feature.right)
+        return (
+            f"<b>{row['sample_id']}</b> · EC {row.get('ec_number', '?')} · "
+            f"{row.get('protein_name', 'Protein')}<br>"
+            f"Feature: {len(feature.left)}-vertex simplex [{left_label}] ↔ "
+            f"{len(feature.right)}-vertex simplex [{right_label}] · "
+            f"shared root {feature.root} · representative distance {feature.distance} hops"
+        )
+
+    def render(message: str | None = None) -> None:
+        with plot_output:
+            clear_output(wait=True)
+            if message:
+                display(Markdown(message))
+            if state["graph"] is None:
+                return
+            title = (
+                feature_title(state["row"], state["feature"])
+                if state["feature"] is not None
+                else f"<b>{state['row']['sample_id']}</b> · No matching feature selected"
+            )
+            figure = draw_protein_feature(
+                state["graph"], state["coordinates"], state["feature"], title=title
+            )
+            display(figure)
+
+    def sample_feature(_=None) -> None:
+        if state["graph"] is None:
+            return
+        state["feature"] = sample_rooted_simplex_pair(
+            state["graph"],
+            max_simplex_size=size_slider.value,
+            distance=distance_slider.value,
+            rng=rng,
+        )
+        if state["feature"] is None:
+            render(
+                f"No pair at distance **{distance_slider.value}** with simplex sizes up to "
+                f"**{size_slider.value}** for {state['row']['sample_id']}. Change a slider or pick another protein."
+            )
+        else:
+            render()
+
+    def random_protein(_=None) -> None:
+        state.update(row=None, graph=None, coordinates=None, feature=None)
+        indices = list(range(len(proteins)))
+        rng.shuffle(indices)
+        failures = []
+        for index in indices[: min(25, len(indices))]:
+            row = proteins.iloc[index]
+            try:
+                graph, coordinates = load_protein_geometry(row)
+            except Exception as exc:
+                failures.append(f"{row['sample_id']}: {exc}")
+                continue
+            state.update(row=row, graph=graph, coordinates=coordinates)
+            sample_feature()
+            return
+        details = "<br>".join(failures[:5])
+        render(
+            "Could not load cached protein geometry from the sampled entries. "
+            "Run notebook 02 again for the active manifest. " + details
+        )
+
+    protein_button.on_click(random_protein)
+    feature_button.on_click(sample_feature)
+    distance_slider.observe(sample_feature, names="value")
+    size_slider.observe(sample_feature, names="value")
+    controls = widgets.VBox(
+        [
+            widgets.HBox([protein_button, feature_button]),
+            widgets.HBox([distance_slider, size_slider]),
+            plot_output,
+        ],
+        layout=widgets.Layout(width="100%"),
+    )
+    display(controls)
+    random_protein()
+    return controls
