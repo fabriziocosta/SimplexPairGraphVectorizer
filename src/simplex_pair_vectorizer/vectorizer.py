@@ -1,4 +1,4 @@
-"""Scikit-learn transformer for rooted pairs of labeled graph cliques."""
+"""Scikit-learn transformer for anchor-paired labeled graph cliques."""
 
 from __future__ import annotations
 
@@ -68,19 +68,19 @@ def _node_order(
 def _simplex_hash(
     graph: nx.Graph,
     simplex: Sequence[Any],
-    root: Any,
+    representative: Any,
     node_label_key: str,
     edge_label_key: str,
 ) -> bytes:
-    """Hash a root-marked simplex from unordered node and edge signatures."""
-    if root not in simplex:
-        raise ValueError("root must be a vertex of the simplex")
+    """Hash a representative-marked simplex from node and edge signatures."""
+    if representative not in simplex:
+        raise ValueError("representative must be a vertex of the simplex")
 
     node_hashes = {}
     for node in simplex:
         node_payload = {
             "kind": "simplex_node_v1",
-            "role": "root" if node == root else "vertex",
+            "role": "representative" if node == representative else "vertex",
             "label": graph.nodes[node].get(node_label_key),
         }
         node_hashes[node] = hashlib.blake2b(
@@ -143,67 +143,61 @@ def _graph_counts(
             break
         simplices.append(tuple(sorted(clique, key=node_keys.__getitem__)))
 
-    by_root: dict[Any, list[int]] = {node: [] for node in graph.nodes}
-    by_root_representative: dict[Any, dict[Any, list[int]]] = {
-        node: {} for node in graph.nodes
-    }
+    by_anchor: dict[Any, list[int]] = {node: [] for node in graph.nodes}
     for simplex_index, simplex in enumerate(simplices):
-        representative = simplex[0]
-        for node in simplex:
-            by_root[node].append(simplex_index)
-            by_root_representative[node].setdefault(representative, []).append(simplex_index)
+        for anchor in simplex:
+            by_anchor[anchor].append(simplex_index)
 
     jitter = 0.0 if distance_jitter in (None, "auto") else float(distance_jitter)
     max_hops = math.floor(max_distance - jitter)
     if max_hops < 0:
         return Counter()
 
-    rooted_simplex_hashes = [
+    anchored_simplex_hashes = [
         {
-            root: _simplex_hash(
-                graph,
-                simplex,
-                root,
-                node_label_key,
-                edge_label_key,
+            anchor: _simplex_hash(
+                graph, simplex, anchor, node_label_key, edge_label_key
             )
-            for root in simplex
+            for anchor in simplex
         }
         for simplex in simplices
     ]
 
-    representatives = {simplex[0] for simplex in simplices}
-    # Reuse one bounded BFS result for every simplex pair that shares a root.
+    anchors = [node for node in ordered_nodes if by_anchor[node]]
+    anchor_order = {node: index for index, node in enumerate(ordered_nodes)}
+    # Every vertex anchors all simplices that contain it. Anchor pairs can be
+    # disjoint from the paired simplices' other vertices and are unordered.
     distances = {
         source: nx.single_source_shortest_path_length(graph, source, cutoff=max_hops)
-        for source in representatives
+        for source in anchors
     }
     counts: Counter[str] = Counter()
-    # The common root is part of the feature. A pair is symmetric; each
-    # simplex pair is visited once for each possible common root.
-    for root in ordered_nodes:
-        representative_groups = by_root_representative[root]
-        for left_index in by_root[root]:
-            left_rep = simplices[left_index][0]
-            for right_rep, path_length in distances[left_rep].items():
-                right_indices = representative_groups.get(right_rep)
-                if not right_indices:
-                    continue
-                distance = float(path_length) + jitter
-                if distance < min_distance or distance > max_distance:
-                    continue
-                for right_index in right_indices:
-                    if right_index < left_index or (right_index == left_index and not include_self):
+    for left_anchor in anchors:
+        left_indices = by_anchor[left_anchor]
+        for right_anchor, path_length in distances[left_anchor].items():
+            right_indices = by_anchor.get(right_anchor)
+            if not right_indices or anchor_order[right_anchor] < anchor_order[left_anchor]:
+                continue
+            distance = float(path_length) + jitter
+            if distance < min_distance or distance > max_distance:
+                continue
+            for left_position, left_index in enumerate(left_indices):
+                # At distance zero both sides use the same anchor, so form
+                # unordered clique pairs there. Distinct anchors use the full
+                # Cartesian product: each side is associated with its anchor.
+                start = left_position if left_anchor == right_anchor else 0
+                for right_index in right_indices[start:]:
+                    if left_index == right_index and not include_self:
                         continue
                     simplex_pair = sorted(
                         (
-                            rooted_simplex_hashes[left_index][root].hex(),
-                            rooted_simplex_hashes[right_index][root].hex(),
+                            anchored_simplex_hashes[left_index][left_anchor].hex(),
+                            anchored_simplex_hashes[right_index][right_anchor].hex(),
                         )
                     )
                     feature = _canonical_json(
                         {
-                            "kind": "rooted_simplex_pair_v3",
+                            "kind": "simplex_pair_v4",
                             "simplices": simplex_pair,
                             "distance": distance.hex(),
                         }
@@ -225,20 +219,19 @@ def _indexed_graph_counts(
 
 
 class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
-    """Map labeled NetworkX graphs to sparse rooted simplex-pair counts.
+    """Map labeled NetworkX graphs to sparse simplex-pair counts.
 
-    A simplex is a clique. A rooted pair contains two simplices sharing a
-    vertex. Each simplex is labeled by its node and edge attributes, with the
-    root marked. Pair distance is the shortest-path distance between each
-    simplex's representative vertex: the vertex with the lowest stable node
-    key. Features are deterministically hashed into unsigned coordinates;
-    collisions accumulate occurrence counts.
+    A simplex is a clique. Every vertex anchors every simplex containing it.
+    For each eligible unordered vertex pair, the vectorizer pairs all cliques
+    associated with each vertex; those cliques need not share a vertex. Each
+    clique type marks its anchor. Features are deterministically hashed into
+    unsigned coordinates; collisions accumulate occurrence counts.
 
     ``distance_jitter="auto"`` applies no jitter because shortest-path
     distances are discrete. A numeric value is added before distance filtering.
     """
 
-    FEATURE_ENCODING_VERSION = 3
+    FEATURE_ENCODING_VERSION = 4
 
     def __init__(
         self,
@@ -247,7 +240,7 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
         max_distance: float = 4,
         distance_mode: str = "representative",
         distance_jitter: str | float | None = "auto",
-        pairing_mode: str = "rooted",
+        pairing_mode: str = "representative",
         nbits: int = 14,
         dense: bool = False,
         include_self: bool = True,
@@ -288,8 +281,8 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
             raise ValueError("distance limits must satisfy 0 <= min_distance <= max_distance")
         if self.distance_mode != "representative":
             raise ValueError("Only distance_mode='representative' is currently supported")
-        if self.pairing_mode != "rooted":
-            raise ValueError("Only pairing_mode='rooted' is currently supported")
+        if self.pairing_mode != "representative":
+            raise ValueError("Only pairing_mode='representative' is currently supported")
         if self.distance_jitter not in (None, "auto"):
             try:
                 jitter = float(self.distance_jitter)

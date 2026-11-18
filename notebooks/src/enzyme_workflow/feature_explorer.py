@@ -1,4 +1,4 @@
-"""Utilities for interactively inspecting rooted simplex-pair features."""
+"""Utilities for interactively inspecting anchor-paired simplex features."""
 
 from __future__ import annotations
 
@@ -16,10 +16,11 @@ from enzyme_workflow.common import active_manifest
 
 
 @dataclass(frozen=True)
-class RootedSimplexPair:
-    """A pair of cliques sharing ``root`` and their representative distance."""
+class SimplexPair:
+    """Two cliques associated with anchors at the selected distance."""
 
-    root: Any
+    left_anchor: Any
+    right_anchor: Any
     left: tuple[Any, ...]
     right: tuple[Any, ...]
     distance: int
@@ -94,79 +95,60 @@ def load_protein_geometry(
     return graph, coordinates
 
 
-def cliques_by_root(graph: nx.Graph, max_simplex_size: int) -> dict[Any, list[tuple[Any, ...]]]:
-    """Enumerate every simplex up to the selected size and index it by root."""
+def cliques_by_anchor(
+    graph: nx.Graph, max_simplex_size: int
+) -> dict[Any, list[tuple[Any, ...]]]:
+    """Enumerate simplices and associate each with every vertex it contains."""
     if max_simplex_size < 1:
         raise ValueError("max_simplex_size must be at least one vertex")
-    by_root: dict[Any, list[tuple[Any, ...]]] = {node: [] for node in graph.nodes}
+    from simplex_pair_vectorizer.vectorizer import _node_order
+
+    node_keys, _ = _node_order(graph, None)
+    by_anchor: dict[Any, list[tuple[Any, ...]]] = {node: [] for node in graph.nodes}
     for clique in nx.enumerate_all_cliques(graph):
         if len(clique) > max_simplex_size:
             break
-        simplex = tuple(sorted(clique))
-        for root in simplex:
-            by_root[root].append(simplex)
-    return {root: simplices for root, simplices in by_root.items() if simplices}
+        simplex = tuple(sorted(clique, key=node_keys.__getitem__))
+        for anchor in simplex:
+            by_anchor[anchor].append(simplex)
+    return {anchor: simplices for anchor, simplices in by_anchor.items() if simplices}
 
 
-def _representative_distance(
-    graph: nx.Graph, left: tuple[Any, ...], right: tuple[Any, ...]
-) -> int:
-    """Match the vectorizer: shortest path between each simplex's lowest node."""
-    left_rep, right_rep = left[0], right[0]
-    if left_rep == right_rep:
-        return 0
-    if graph.has_edge(left_rep, right_rep):
-        return 1
-    # Both representatives are in cliques that contain the same root, so a
-    # two-edge path through that root is always present when they are distinct.
-    return 2
-
-
-def sample_rooted_simplex_pair(
+def sample_simplex_pair(
     graph: nx.Graph,
     *,
     max_simplex_size: int,
     distance: int,
     rng: random.Random,
-    random_attempts: int = 5000,
-) -> RootedSimplexPair | None:
-    """Choose a random valid rooted pair, allowing the two simplex sizes to differ."""
+) -> SimplexPair | None:
+    """Choose anchors exactly ``distance`` hops apart, then their incident cliques."""
     if not isinstance(distance, int) or distance < 0:
         raise ValueError("distance must be a nonnegative integer")
-    # In a rooted pair, each representative is either the shared root or one
-    # edge away from it, so distances above two cannot occur.
-    if distance > 2:
+    by_anchor = cliques_by_anchor(graph, max_simplex_size)
+    anchors = list(by_anchor)
+    if not anchors:
         return None
-    by_root = cliques_by_root(graph, max_simplex_size)
-    roots = list(by_root)
-    if not roots:
+    anchor_order = {node: index for index, node in enumerate(graph.nodes)}
+    anchor_pairs: list[tuple[Any, Any]] = []
+    for left_anchor in anchors:
+        lengths = nx.single_source_shortest_path_length(graph, left_anchor, cutoff=distance)
+        for right_anchor, path_length in lengths.items():
+            if (
+                path_length == distance
+                and right_anchor in by_anchor
+                and anchor_order[right_anchor] >= anchor_order[left_anchor]
+            ):
+                anchor_pairs.append((left_anchor, right_anchor))
+    if not anchor_pairs:
         return None
-
-    for _ in range(random_attempts):
-        root = rng.choice(roots)
-        incident = by_root[root]
-        left = rng.choice(incident)
-        right = rng.choice(incident)
-        if _representative_distance(graph, left, right) == distance:
-            return RootedSimplexPair(root=root, left=left, right=right, distance=distance)
-
-    # Exact fallback so a valid but uncommon distance is not missed by random draws.
-    seen = 0
-    selected: RootedSimplexPair | None = None
-    for root, incident in by_root.items():
-        for left_index, left in enumerate(incident):
-            for right in incident[left_index:]:
-                if _representative_distance(graph, left, right) != distance:
-                    continue
-                seen += 1
-                if rng.randrange(seen) == 0:
-                    selected = RootedSimplexPair(
-                        root=root,
-                        left=left,
-                        right=right,
-                        distance=distance,
-                    )
-    return selected
+    left_anchor, right_anchor = rng.choice(anchor_pairs)
+    return SimplexPair(
+        left_anchor=left_anchor,
+        right_anchor=right_anchor,
+        left=rng.choice(by_anchor[left_anchor]),
+        right=rng.choice(by_anchor[right_anchor]),
+        distance=distance,
+    )
 
 
 def _edge_key(left: Any, right: Any) -> frozenset[Any]:
@@ -210,7 +192,7 @@ def _edge_trace(
 def draw_protein_feature(
     graph: nx.Graph,
     coordinates: Mapping[Any, tuple[float, float, float]],
-    feature: RootedSimplexPair | None,
+    feature: SimplexPair | None,
     *,
     title: str,
 ):
@@ -227,12 +209,12 @@ def draw_protein_feature(
     selected_nodes: set[Any] = set()
     highlighted_edges_a: set[tuple[Any, Any]] = set()
     highlighted_edges_b: set[tuple[Any, Any]] = set()
-    root = None
+    representatives = None
     if feature is not None:
         selected_nodes = set(feature.left) | set(feature.right)
         highlighted_edges_a = set(itertools.combinations(feature.left, 2))
         highlighted_edges_b = set(itertools.combinations(feature.right, 2))
-        root = feature.root
+        representatives = (feature.left_anchor, feature.right_anchor)
 
     selected_edge_keys = {
         _edge_key(left, right)
@@ -311,25 +293,31 @@ def draw_protein_feature(
         )
 
     add_node_trace(selected_order, name="Feature residues", opacity=1.0, size=6.0, outline="#FFFFFF")
-    if root is not None:
-        xyz = coordinates[root]
-        root_label = str(graph.nodes[root].get("label", "UNK"))
-        traces.append(
-            go.Scatter3d(
-                x=[xyz[0]], y=[xyz[1]], z=[xyz[2]],
-                mode="markers",
-                name="Shared root",
-                marker={
-                    "size": 10,
-                    "symbol": "diamond",
-                    "color": amino_colors.get(root_label, "#A0A0A0"),
-                    "opacity": 1.0,
-                    "line": {"color": "#FFFFFF", "width": 2},
-                },
-                hovertemplate=f"Shared root · {root_label}<extra></extra>",
-                showlegend=True,
+    if representatives is not None:
+        for representative, outline_color, marker_name, symbol in zip(
+            representatives,
+            ("#FFB000", "#00D5FF"),
+            ("Anchor A", "Anchor B"),
+            ("diamond", "square"),
+        ):
+            xyz = coordinates[representative]
+            representative_label = str(graph.nodes[representative].get("label", "UNK"))
+            traces.append(
+                go.Scatter3d(
+                    x=[xyz[0]], y=[xyz[1]], z=[xyz[2]],
+                    mode="markers",
+                    name=marker_name,
+                    marker={
+                        "size": 10,
+                        "symbol": symbol,
+                        "color": amino_colors.get(representative_label, "#A0A0A0"),
+                        "opacity": 1.0,
+                        "line": {"color": outline_color, "width": 3},
+                    },
+                    hovertemplate=f"{marker_name} · {representative_label}<extra></extra>",
+                    showlegend=True,
+                )
             )
-        )
 
     figure = go.Figure(data=traces)
     figure.update_layout(
@@ -353,15 +341,15 @@ def draw_protein_feature(
 def display_feature_explorer(
     project_root: str | Path,
     *,
-    max_representative_distance: int = 6,
+    max_anchor_distance: int = 6,
     max_simplex_size: int = 4,
 ):
-    """Display the widget-driven protein and rooted simplex-pair explorer."""
+    """Display the widget-driven protein and anchor-paired simplex explorer."""
     import ipywidgets as widgets
     from IPython.display import Markdown, clear_output, display
 
-    if not isinstance(max_representative_distance, int) or max_representative_distance < 0:
-        raise ValueError("max_representative_distance must be a nonnegative integer")
+    if not isinstance(max_anchor_distance, int) or max_anchor_distance < 0:
+        raise ValueError("max_anchor_distance must be a nonnegative integer")
     if not isinstance(max_simplex_size, int) or max_simplex_size < 1:
         raise ValueError("max_simplex_size must be at least one vertex")
 
@@ -377,11 +365,11 @@ def display_feature_explorer(
     protein_button = widgets.Button(description="Random protein", button_style="primary")
     feature_button = widgets.Button(description="Random feature")
     distance_slider = widgets.IntSlider(
-        value=min(1, max_representative_distance),
+        value=min(1, max_anchor_distance),
         min=0,
-        max=max_representative_distance,
+        max=max_anchor_distance,
         step=1,
-        description="Representative distance (hops)",
+        description="Anchor distance (hops)",
         continuous_update=False,
         style={"description_width": "initial"},
         layout=widgets.Layout(width="48%"),
@@ -397,7 +385,7 @@ def display_feature_explorer(
         layout=widgets.Layout(width="48%"),
     )
 
-    def feature_title(row, feature: RootedSimplexPair) -> str:
+    def feature_title(row, feature: SimplexPair) -> str:
         graph = state["graph"]
         left_label = ", ".join(str(graph.nodes[node].get("label", "?")) for node in feature.left)
         right_label = ", ".join(str(graph.nodes[node].get("label", "?")) for node in feature.right)
@@ -406,7 +394,7 @@ def display_feature_explorer(
             f"{row.get('protein_name', 'Protein')}<br>"
             f"Feature: {len(feature.left)}-vertex simplex [{left_label}] ↔ "
             f"{len(feature.right)}-vertex simplex [{right_label}] · "
-            f"shared root {feature.root} · representative distance {feature.distance} hops"
+            f"anchors {feature.left_anchor} ↔ {feature.right_anchor} · distance {feature.distance} hops"
         )
 
     def render(message: str | None = None) -> None:
@@ -429,7 +417,7 @@ def display_feature_explorer(
     def sample_feature(_=None) -> None:
         if state["graph"] is None:
             return
-        state["feature"] = sample_rooted_simplex_pair(
+        state["feature"] = sample_simplex_pair(
             state["graph"],
             max_simplex_size=size_slider.value,
             distance=distance_slider.value,

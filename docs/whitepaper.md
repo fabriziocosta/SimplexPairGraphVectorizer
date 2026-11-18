@@ -2,88 +2,62 @@
 
 ## Abstract
 
-This note defines the graph representation used by the simplex-pair vectorizer. A labeled graph is mapped to a nonnegative vector of occurrence counts. Each count describes two labeled clique patterns that share a chosen root vertex, together with the graph distance between representatives of the two cliques. The construction combines local labeled structure with a bounded measure of separation in the full graph.
+The vectorizer maps a labeled graph to counts of pairs of labeled clique patterns. Each occurrence starts from an unordered pair of anchor vertices at a selected shortest-path distance. Every clique containing one anchor can pair with every clique containing the other anchor; the cliques need not share any vertex. At distance zero, both clique collections are associated with the same anchor.
 
 ## Labeled graph and simplices
 
-Let
+Let $G=(V,E,\ell_V,\ell_E)$ be a finite, simple, undirected graph with vertex and edge labels. A simplex is a nonempty clique, with dimension $|\sigma|-1$. Given a maximum dimension $q$, the allowed simplices are
 
-$G=(V,E,\ell_V,\ell_E)$
+$$\mathcal{C}_{q}(G)=\{\sigma\subseteq V:1\leq |\sigma|\leq q+1,\ \forall u,v\in\sigma,\ u\ne v\Rightarrow\{u,v\}\in E\}.$$
 
-be a finite, simple, undirected graph. Here $V$ is the vertex set, $E$ is the edge set, and $\ell_V$ and $\ell_E$ assign labels to vertices and edges. The label sets need not be numeric.
+For each vertex $u$, its associated simplex collection is
 
-A simplex of $G$ is a clique: a nonempty set of vertices $\sigma\subseteq V$ for which every distinct pair in $\sigma$ is an edge. Its dimension is
+$$\mathcal{C}_{q}(G;u)=\{\sigma\in\mathcal{C}_{q}(G):u\in\sigma\}.$$
 
-$\dim(\sigma)=|\sigma|-1$
+Every graph vertex with at least one associated simplex can serve as an anchor. A clique is therefore represented once for each of its vertices, with that vertex marked as the anchor in the corresponding type.
 
-Thus vertices, edges, triangles, and four-vertex cliques have dimensions 0, 1, 2, and 3 respectively. Given a maximum simplex dimension $q$, the allowed simplex family is
+## Anchored simplex types
 
-$\mathcal{C}_{q}(G)=\{\sigma\subseteq V:1\leq |\sigma|\leq q+1,\ \forall u,v\in\sigma,\ u\ne v\Rightarrow\{u,v\}\in E\}$
+Write $\kappa_G(\sigma,u)$ for the type of simplex $\sigma$ anchored at $u\in\sigma$. This type marks the anchor's vertex label, hashes the labels of all simplex vertices, and hashes every induced edge together with the hashes of its two endpoint nodes. The node and edge signature lists are sorted before hashing, so the type does not depend on incidental iteration order.
 
-For a root vertex $r$, the simplices containing that root are
+## Anchor pairs and feature occurrences
 
-$\mathcal{C}_{q}(G;r)=\{\sigma\in\mathcal{C}_{q}(G):r\in\sigma\}$
+An anchor pair $\{u,v\}$ is unordered. Its distance is the unweighted shortest-path distance in the full graph, $d_G(u,v)$. It is eligible when
 
-## Rooted simplex types
+$$L\leq d_G(u,v)+\varepsilon\leq U,$$
 
-The root distinguishes one vertex within a simplex. Write $\kappa_G(\sigma,r)$ for the labeled type of the rooted simplex $(\sigma,r)$. This type records the vertex labels on $\sigma$ with the root marked, the edge labels on every edge induced by $\sigma$, and the incidence of those labels within the clique.
+where $\varepsilon$ is an optional nonnegative offset (zero by default). For each eligible anchor pair, take the Cartesian product of the associated simplex collections. At distance zero, $u=v$ and the pair of simplices is unordered, with replacement when self-pairs are enabled. At positive distance, a simplex containing $u$ is paired with a simplex containing $v$; the two simplices may be disjoint, overlap, or be identical if both contain both anchors. When self-pairs are disabled, identical simplex pairs are omitted.
 
-Consequently, a rooted simplex type represents a small, labeled graph pattern, not just a list of amino-acid labels. The root mark retains which vertex is shared when two simplex patterns are paired. A consistent ordering convention for vertices is used when assigning these types and choosing representatives.
+The symbolic feature for an occurrence is
 
-## Rooted pairs and representative distance
+$$\phi_G(\{u,v\},\sigma,\tau)=\left(\left[\kappa_G(\sigma,u),\kappa_G(\tau,v)\right]_{\mathrm{unordered}},\ d_G(u,v)+\varepsilon\right).$$
 
-A feature occurrence starts with two simplices $\sigma$ and $\tau$ that both contain a root $r$. The pair is unordered: swapping $\sigma$ and $\tau$ does not create a distinct feature. The pair may contain the same simplex twice when self-pairs are enabled. If $\sigma$ and $\tau$ share more than one vertex, their pairing is considered once for each shared root.
+The unordered pair of anchored simplex types is canonicalized by sorting its two members. This also makes anchor ordering immaterial: swapping $u,v$ and their associated simplices gives the same feature.
 
-Each simplex has a representative vertex $\rho(\sigma)$, selected as its least vertex under the fixed vertex ordering. The pair distance is the shortest path length in the full graph between these representatives:
-
-$\delta_G(\sigma,\tau)=d_G\bigl(\rho(\sigma),\rho(\tau)\bigr)$
-
-Here $d_G$ is ordinary unweighted graph distance. An optional nonnegative offset $\varepsilon$ may be added before filtering; with discrete graph distances the default offset is zero. A pair contributes only when
-
-$L\leq\delta_G(\sigma,\tau)+\varepsilon\leq U$
-
-These distance bounds are measured in graph edges (contact-network hops), not in ångströms. For a self-pair, the representative distance is zero.
-
-The symbolic feature associated with an eligible rooted pair is
-
-$\phi_G(r,\sigma,\tau)=\bigl((\min_{\preceq}\{\kappa_G(\sigma,r),\kappa_G(\tau,r)\},\ \max_{\preceq}\{\kappa_G(\sigma,r),\kappa_G(\tau,r)\}),\ \delta_G(\sigma,\tau)+\varepsilon\bigr)$
-
-The ordering $\preceq$ is a fixed ordering of rooted simplex types; using it makes the simplex-pair component symmetric.
+For a fixed anchor $u$, this construction includes every eligible anchor vertex $v$ within the configured distance range and every clique associated with each anchor. In particular, when $u=v$, it pairs the simplices associated with that single vertex.
 
 ## Graph-level feature counts
 
-Let $s\in\{0,1\}$ indicate whether self-pairs are included. For each root, consider unordered pairs with replacement from $\mathcal{C}_{q}(G;r)$ when $s=1$, and unordered distinct pairs when $s=0$. Represent an unordered pair by the equivalence class $[\sigma,\tau]$ under the relation $(\sigma,\tau)\sim(\tau,\sigma)$. The eligible pair collection is
+Let $s\in\{0,1\}$ specify whether self-pairs are included, and let $\preceq$ be the stable ordering of vertices. Define $\mathrm{allowed}_s(\sigma,\tau)$ to be true for distinct simplices, and for identical simplices exactly when $s=1$. The count of feature $\phi$ is
 
-$\mathcal{P}_s(G;r)=\{[\sigma,\tau]:\sigma,\tau\in\mathcal{C}_{q}(G;r),\ (\sigma\ne\tau)\lor(s=1)\}$
+$$c_G(\phi)=\sum_{u\preceq v\in V}\ \sum_{\sigma\in\mathcal{C}_q(G;u)}\ \sum_{\tau\in\mathcal{C}_q(G;v)}\mathbf{1}[L\leq d_G(u,v)+\varepsilon\leq U]\,\mathbf{1}[\phi=\phi_G(\{u,v\},\sigma,\tau)]\,\mathbf{1}[\mathrm{allowed}_s(\sigma,\tau)].$$
 
-The count of a symbolic feature $\phi$ in graph $G$ is
+For $u=v$, the simplex-pair sum is unordered: each pair is counted once, with identical simplices allowed exactly when $s=1$. For $u\ne v$, the anchor pair is visited once in a stable vertex order and the full Cartesian product is taken. Repeated feature types arising at different anchors or in different graph regions add to the same count.
 
-$c_G(\phi)=\sum_{r\in V}\sum_{[\sigma,\tau]\in\mathcal{P}_{s}(G;r)}\mathbf{1}[L\leq\delta_G(\sigma,\tau)+\varepsilon\leq U]\,\mathbf{1}[\phi=\phi_G(r,\sigma,\tau)]$
-
-The sum counts occurrences, including repeated occurrences of the same labeled pattern at different roots or in different parts of the graph. If a pair of cliques has multiple common vertices, each such vertex can serve as the root and contributes its own occurrence.
-
-The uncompressed representation is the count function
-
-$c_G:\mathcal{F}\rightarrow\mathbb{N}_0$
-
-where $\mathcal{F}$ is the set of possible symbolic rooted simplex-pair types and $\mathbb{N}_0$ denotes the nonnegative integers. It can be viewed as a sparse vector because only finitely many features occur in any finite graph.
+The resulting uncompressed representation is the count function $c_G:\mathcal{F}\rightarrow\mathbb{N}_0$. It is a sparse vector for any finite graph.
 
 ## Fixed-width vector representation
 
-For learning, symbolic features are mapped to a fixed coordinate set $\{1,\ldots,m\}$, with $m=2^b$ for a chosen width $b$. Let $h:\mathcal{F}\rightarrow\{1,\ldots,m\}$ be the deterministic feature mapping. The coordinate value for graph $G$ is
+For learning, symbolic features are mapped to a fixed coordinate set of size $m=2^b$ by a deterministic hash $h$. The coordinate value is
 
-$x_G(j)=\sum_{\phi\in\mathcal{F},\ h(\phi)=j}c_G(\phi),\quad j=1,\ldots,m$
+$$x_G(j)=\sum_{\phi\in\mathcal{F},\ h(\phi)=j}c_G(\phi),\quad j=1,\ldots,m.$$
 
-If different symbolic features map to the same coordinate, their counts add. The resulting vector has nonnegative occurrence-count values and is typically sparse. It does not normalize counts or weight features by class.
+Hash collisions add their occurrence counts. The representation does not normalize counts or weight them by class.
 
 ## Protein contact graph interpretation
 
-In the enzyme workflow, each graph vertex represents a C$\alpha$ atom from a selected protein chain, and an edge represents a residue pair whose spatial separation lies in the chosen contact window. The graph's vertices are labeled by an amino-acid category, and its edges receive contact labels (or optional distance-bin labels). The simplex-pair features are then generated from this labeled contact graph.
-
-With the current notebook settings, the contact window is 4–8 Å, the node alphabet is `aa20`, the maximum simplex dimension is $q=3$, the representative distance interval is $[L,U]=[0,4]$, self-pairs are included, and the fixed vector width is $2^{11}$. The vectorizer constructor itself defaults to $2^{14}$ coordinates. The contact window determines which graph edges exist; the 0–4 feature distance limit instead counts shortest paths through those edges.
+In the enzyme workflow, a graph vertex represents a C$\alpha$ atom from a selected protein chain, and an edge represents a residue pair within the selected spatial contact window. Vertex labels encode amino-acid categories, while edge labels encode contact labels or optional distance bins. The vectorizer forms anchor pairs using shortest-path hops through this contact graph; these hops are distinct from spatial distances in ångströms.
 
 ## Interpretation and scope
 
-Each coordinate aggregates evidence for co-occurring, root-anchored labeled clique patterns at a selected representative distance. The representation therefore retains information about amino-acid labels, labeled local contact structure, and graph-scale separation, while replacing the original graph by counts of these patterns.
-
-The feature vector is a summary rather than a lossless encoding of the graph. Different graphs can produce the same counts, and finite-width coordinate mapping can merge distinct symbolic patterns. The construction is also defined relative to its vertex-ordering convention because that convention selects simplex representatives and orders labels in rooted types. These properties should be considered when interpreting similarity or classifier results.
+Each coordinate aggregates evidence for pairs of locally labeled clique patterns anchored at vertices separated by a selected graph distance. The construction preserves node labels, induced edge labels, anchor positions within cliques, and graph-scale separation. It is a summary rather than a lossless graph encoding: distinct graphs can yield the same counts, and the fixed-width hash can merge distinct symbolic features. Stable node ordering makes enumeration deterministic; it does not restrict which vertices may anchor a clique.
