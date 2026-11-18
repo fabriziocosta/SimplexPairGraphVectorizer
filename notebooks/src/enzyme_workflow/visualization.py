@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 from html import escape
 import json
@@ -129,6 +130,7 @@ def visualize_proteins_2d(
     node_label_alphabet: str = "aa20",
     simplex_dimension: int | tuple[int, int] = 3,
     clique_enumerator: str = "auto",
+    graph_batch_size: int = 128,
     pair_distance: int | float | tuple[int | float, int | float] = 4,
     nbits: int = 14,
     include_self: bool = True,
@@ -141,6 +143,13 @@ def visualize_proteins_2d(
     from abstractgraph_graphicalizer.protein import ProteinLabelGraphicalizer, read_graph_pickle
     from imste import IteratedMinimumSpanningTreeEmbedder
     from simplex_pair_vectorizer import SimplexPairGraphVectorizer
+
+    if (
+        not isinstance(graph_batch_size, int)
+        or isinstance(graph_batch_size, bool)
+        or graph_batch_size < 1
+    ):
+        raise ValueError("graph_batch_size must be a positive integer")
 
     manifest_path, ec_level = active_manifest(root)
     dataset = _load_dataset(root, manifest_path, ec_level)
@@ -189,16 +198,6 @@ def visualize_proteins_2d(
         )
     else:
         print(f"Loading graphs for vectorization ({len(dataset):,} proteins)", flush=True)
-        graphs = [
-            read_graph_pickle(path)
-            for path in tqdm(
-                dataset["graph_path"],
-                total=len(dataset),
-                desc="Loading protein graphs",
-                unit="protein",
-            )
-        ]
-        labeled_graphs = ProteinLabelGraphicalizer(alphabet=node_label_alphabet).fit_transform(graphs)
         vectorizer = SimplexPairGraphVectorizer(
             simplex_dimension=simplex_dimension,
             clique_enumerator=clique_enumerator,
@@ -209,8 +208,37 @@ def visualize_proteins_2d(
             n_jobs=-1,
             progress=True,
         )
-        print("Starting simplex-pair feature extraction", flush=True)
-        X = vectorizer.fit_transform(labeled_graphs)
+        vectorizer.fit([])
+        graphicalizer = ProteinLabelGraphicalizer(alphabet=node_label_alphabet)
+        feature_batches = []
+        batch_count = (len(dataset) + graph_batch_size - 1) // graph_batch_size
+        with tqdm(
+            total=len(dataset),
+            desc="Loading protein graphs",
+            unit="protein",
+        ) as loading_progress:
+            for batch_index, batch_start in enumerate(
+                range(0, len(dataset), graph_batch_size), start=1
+            ):
+                batch_end = min(batch_start + graph_batch_size, len(dataset))
+                graphs = []
+                for graph_path in dataset["graph_path"].iloc[batch_start:batch_end]:
+                    graphs.append(read_graph_pickle(graph_path))
+                    loading_progress.update(1)
+
+                print(
+                    f"Vectorizing batch {batch_index:,}/{batch_count:,} "
+                    f"({len(graphs):,} proteins)",
+                    flush=True,
+                )
+                labeled_graphs = graphicalizer.transform(graphs)
+                del graphs
+                feature_batches.append(vectorizer.transform(labeled_graphs))
+                del labeled_graphs
+                gc.collect()
+
+        X = sparse.vstack(feature_batches, format="csr")
+        del feature_batches
         temporary_feature_cache = feature_cache.with_suffix(".joblib.tmp")
         joblib.dump(X, temporary_feature_cache)
         temporary_feature_cache.replace(feature_cache)
