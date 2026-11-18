@@ -35,7 +35,8 @@ The `notebooks/` workflow has four stages:
 2. `02_build_protein_graph_dataset.ipynb` downloads RCSB mmCIF files and saves
    chain-level protein contact graphs plus resumable build status.
 3. `03_train_test_ec_classifier.ipynb` loads the graph cache and trains a
-   grouped train/test classifier using the simplex-pair features.
+   grouped train/test classifier using the simplex-pair features, with square
+   confusion-matrix, ROC, and precision–recall plots.
 4. `04_visualize_ec_proteins_2d.ipynb` vectorizes the same cached graphs and
    visualizes them with the sibling `IteratedMinimumSpanningTreeEmbedder`.
 
@@ -56,7 +57,10 @@ are cached under `data/processed/`; set `REBUILD_FEATURES` or
 Notebook 01 publishes its active manifest so notebooks 02–04 follow the latest
 selected EC level automatically. Notebook 02 keeps graph caches in a folder
 keyed by the contact-distance range, so changing those settings uses a fresh
-cache while reruns with the same settings reuse completed graphs.
+cache while reruns with the same settings reuse completed graphs. Missing
+structures are downloaded concurrently by PDB entry, then contact graphs are
+built concurrently by protein chain; adjust `N_JOBS` and `DOWNLOAD_JOBS` in
+notebook 02 to fit the machine.
 
 The default EC source is UniProtKB (human proteins with PDB cross-references);
 PDBe maps each selected accession and PDB entry to a chain, and the graphicalizer
@@ -83,6 +87,9 @@ cliques of up to four vertices. Rooted pairs share a graph vertex; each pair is
 counted once for each possible shared root. Self-pairs are included by default.
 
 ## Parameters
+
+For the mathematical definition of rooted simplex-pair features and graph-level
+count vectors, see [the whitepaper](docs/whitepaper.md).
 
 The recovered classifier configuration is used as the default: dimension 3,
 pair distance 0–4 inclusive, representative distance, rooted pairing, 14-bit

@@ -31,6 +31,8 @@ def build_graph_dataset(
     download_timeout_seconds: int = 60,
     download_max_retries: int = 4,
     download_retry_backoff_seconds: float = 2.0,
+    n_jobs: int = 8,
+    download_jobs: int = 8,
 ) -> GraphDatasetResult:
     """Build graphs for the active manifest, reporting cache and progress."""
     root = add_project_sources(project_root)
@@ -60,19 +62,39 @@ def build_graph_dataset(
     )
     unique_pdb_ids = set(manifest["pdb_id"].str.lower())
     cached_mmcif = sum((raw_dir / f"{pdb_id}.cif.gz").is_file() for pdb_id in unique_pdb_ids)
+    pending_rows = [
+        row for row in manifest.to_dict(orient="records")
+        if overwrite or not (
+            graph_path(row["sample_id"]).is_file()
+            and graph_path(row["sample_id"]).stat().st_size > 0
+        )
+    ]
+    missing_pending_pdbs = {
+        str(row["pdb_id"]).lower()
+        for row in pending_rows
+        if not (raw_dir / f"{str(row['pdb_id']).lower()}.cif.gz").is_file()
+    }
     print(f"Manifest source: {manifest_path} (EC level {ec_level})")
     print(f"Manifest samples: {len(manifest):,}")
     print(f"Existing graph caches: {cached_graphs:,}/{len(manifest):,}")
     print(f"Existing mmCIF files: {cached_mmcif:,}/{len(unique_pdb_ids):,} unique PDB entries")
     print(f"Graph cache: {graph_dir} (contact range {min_contact_distance:g}–{max_contact_distance:g} Å)")
+    print(f"Parallel workers: {n_jobs} graph workers; {download_jobs} structure-download workers")
 
     planned = len(manifest)
     status_rows = []
-    with tqdm(total=planned, desc="Building contact graphs", unit="protein") as bar:
+    with (
+        tqdm(total=len(missing_pending_pdbs), desc="Downloading missing mmCIFs", unit="PDB", position=0) as download_bar,
+        tqdm(total=planned, desc="Building contact graphs", unit="protein", position=1) as bar,
+    ):
 
         def report_progress(result: dict) -> None:
             bar.update(1)
             bar.set_postfix(status=result["status"], sample=result["sample_id"], refresh=True)
+
+        def report_download(result: dict) -> None:
+            download_bar.update(1)
+            download_bar.set_postfix(status=result["status"], pdb=result["pdb_id"], refresh=True)
 
         status_rows = build(
             manifest_path,
@@ -86,8 +108,11 @@ def build_graph_dataset(
             download_timeout_seconds=download_timeout_seconds,
             download_max_retries=download_max_retries,
             download_retry_backoff_seconds=download_retry_backoff_seconds,
+            n_jobs=n_jobs,
+            download_jobs=download_jobs,
             sample_limit=sample_limit,
             progress=report_progress,
+            download_progress=report_download,
             verbose=False,
         )
 

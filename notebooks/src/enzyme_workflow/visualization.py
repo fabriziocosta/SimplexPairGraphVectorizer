@@ -153,6 +153,7 @@ def visualize_proteins_2d(
         "mean_shift_iterations": 0,
         "device": "auto",
         "random_state": 42,
+        "pca_init": False,
         "verbose": True,
     }
     if imste_parameters is not None:
