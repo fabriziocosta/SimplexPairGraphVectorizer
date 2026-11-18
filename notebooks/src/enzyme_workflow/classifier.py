@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
+import subprocess
+import tempfile
 import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import (
@@ -29,6 +39,206 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import Normalizer, label_binarize
 
 from enzyme_workflow.common import active_manifest, add_project_sources
+
+
+UNIPROT_SEARCH_URL = "https://rest.uniprot.org/uniprotkb/search"
+
+
+def _require_mmseqs() -> str:
+    executable = shutil.which("mmseqs")
+    if executable is None:
+        raise RuntimeError(
+            "MMseqs2 is required to prevent homologous proteins crossing the train/test split. "
+            "Install it with `brew install mmseqs2` (macOS) or `conda install -c conda-forge "
+            "-c bioconda mmseqs2` (Linux/macOS), then rerun notebook 03."
+        )
+    return executable
+
+
+def _uniprot_session() -> requests.Session:
+    retry = Retry(
+        total=5,
+        connect=5,
+        read=5,
+        backoff_factor=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        respect_retry_after_header=True,
+    )
+    session = requests.Session()
+    session.headers.update({"User-Agent": "simplex-pair-enzyme-notebook/0.1"})
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    return session
+
+
+def _fetch_uniprot_sequences(
+    accessions: Iterable[str],
+    cache_path: Path,
+    *,
+    timeout_seconds: int = 60,
+    batch_size: int = 100,
+) -> dict[str, str]:
+    """Load cached canonical sequences and fetch any missing UniProt accessions."""
+    requested = sorted(
+        {str(accession).strip() for accession in accessions if str(accession).strip()}
+    )
+    if not requested:
+        raise ValueError("The active manifest contains no UniProt accessions")
+
+    sequences: dict[str, str] = {}
+    if cache_path.is_file():
+        cached = pd.read_csv(cache_path, sep="\t", dtype=str).fillna("")
+        if {"uniprot_accession", "sequence"}.issubset(cached.columns):
+            sequences = dict(zip(cached["uniprot_accession"], cached["sequence"]))
+    missing = [accession for accession in requested if not sequences.get(accession)]
+    if missing:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        session = _uniprot_session()
+        for start in range(0, len(missing), batch_size):
+            batch = missing[start : start + batch_size]
+            query = " OR ".join(f"accession:{accession}" for accession in batch)
+            response = session.get(
+                UNIPROT_SEARCH_URL,
+                params={"query": query, "format": "fasta", "size": batch_size},
+                timeout=timeout_seconds,
+            )
+            response.raise_for_status()
+            current_accession = None
+            current_sequence: list[str] = []
+
+            def save_current() -> None:
+                if current_accession is not None and current_sequence:
+                    sequences[current_accession] = "".join(current_sequence).upper()
+
+            for line in response.text.splitlines():
+                if line.startswith(">"):
+                    save_current()
+                    header = line[1:].split(maxsplit=1)[0]
+                    fields = header.split("|")
+                    current_accession = fields[1] if len(fields) >= 3 else fields[0]
+                    current_sequence = []
+                elif current_accession is not None:
+                    current_sequence.append(line.strip())
+            save_current()
+
+        missing = [accession for accession in requested if not sequences.get(accession)]
+        if missing:
+            preview = ", ".join(missing[:10])
+            suffix = "..." if len(missing) > 10 else ""
+            raise RuntimeError(
+                f"UniProt did not return sequences for {len(missing)} active accessions: "
+                f"{preview}{suffix}. No split was made because sequence homology could not be checked."
+            )
+
+        temporary = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        pd.DataFrame(
+            sorted(sequences.items()), columns=["uniprot_accession", "sequence"]
+        ).to_csv(temporary, sep="\t", index=False)
+        temporary.replace(cache_path)
+
+    return {accession: sequences[accession] for accession in requested}
+
+
+def _sequence_homology_groups(
+    accessions: Iterable[str],
+    sequences: dict[str, str],
+    cache_dir: Path,
+    *,
+    min_sequence_identity: float,
+    min_coverage: float,
+    n_jobs: int | None,
+) -> dict[str, str]:
+    """Cluster similar sequences with MMseqs2, caching by inputs and thresholds."""
+    if not 0 < min_sequence_identity <= 1:
+        raise ValueError("min_sequence_identity must be greater than zero and at most one")
+    if not 0 < min_coverage <= 1:
+        raise ValueError("min_coverage must be greater than zero and at most one")
+    executable = _require_mmseqs()
+
+    requested = sorted({str(accession) for accession in accessions})
+    version_result = subprocess.run(
+        [executable, "version"], capture_output=True, text=True, check=True
+    )
+    version = version_result.stdout.strip() or version_result.stderr.strip()
+    digest = hashlib.sha256()
+    digest.update(
+        f"{version}\0{min_sequence_identity:.6f}\0{min_coverage:.6f}\0".encode("ascii")
+    )
+    for accession in requested:
+        digest.update(accession.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(sequences[accession].encode("ascii"))
+        digest.update(b"\0")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cluster_cache = cache_dir / f"sequence_clusters_{digest.hexdigest()[:20]}.tsv"
+
+    if cluster_cache.is_file():
+        clustered = pd.read_csv(cluster_cache, sep="\t", dtype=str)
+        groups = dict(zip(clustered["uniprot_accession"], clustered["homology_cluster"]))
+    else:
+        threads = (os.cpu_count() or 1) if n_jobs is None else n_jobs
+        if threads < 0:
+            threads = max(1, (os.cpu_count() or 1) + threads + 1)
+        threads = max(1, threads)
+        with tempfile.TemporaryDirectory(prefix="mmseqs_homology_", dir=cache_dir) as temp_name:
+            temp_dir = Path(temp_name)
+            fasta_path = temp_dir / "sequences.fasta"
+            output_prefix = temp_dir / "clusters"
+            mmseqs_temp = temp_dir / "tmp"
+            mmseqs_temp.mkdir()
+            with fasta_path.open("w", encoding="ascii") as handle:
+                for accession in requested:
+                    handle.write(f">{accession}\n{sequences[accession]}\n")
+            result = subprocess.run(
+                [
+                    executable,
+                    "easy-cluster",
+                    str(fasta_path),
+                    str(output_prefix),
+                    str(mmseqs_temp),
+                    "--min-seq-id",
+                    str(min_sequence_identity),
+                    "-c",
+                    str(min_coverage),
+                    "--cov-mode",
+                    "0",
+                    "--cluster-mode",
+                    "1",
+                    "--alignment-mode",
+                    "3",
+                    "--threads",
+                    str(threads),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "MMseqs2 sequence clustering failed; no train/test split was made. "
+                    f"Error: {result.stderr[-2000:]}"
+                )
+            raw_clusters = Path(f"{output_prefix}_cluster.tsv")
+            if not raw_clusters.is_file():
+                raise RuntimeError("MMseqs2 completed without producing its cluster mapping")
+            cluster_rows = pd.read_csv(
+                raw_clusters,
+                sep="\t",
+                header=None,
+                names=["homology_cluster", "uniprot_accession"],
+                dtype=str,
+            )
+            cluster_rows.to_csv(cluster_cache, sep="\t", index=False)
+            groups = dict(
+                zip(cluster_rows["uniprot_accession"], cluster_rows["homology_cluster"])
+            )
+
+    missing = sorted(set(requested) - set(groups))
+    if missing:
+        raise RuntimeError(
+            "MMseqs2 returned no cluster for active accessions: "
+            + ", ".join(missing[:10])
+        )
+    return {accession: groups[accession] for accession in requested}
 
 
 def _detach_fit_callbacks(model: Pipeline) -> None:
@@ -144,6 +354,8 @@ def run_classifier(
     *,
     test_size: float = 0.20,
     random_state: int = 42,
+    homology_min_sequence_identity: float = 0.30,
+    homology_min_coverage: float = 0.80,
     node_label_alphabet: str = "aa20",
     base_estimator_kind: str = "linear_sgd",
     max_simplex_dimension: int = 3,
@@ -154,7 +366,7 @@ def run_classifier(
     n_jobs: int | None = -1,
     classifier_progress: bool = True,
 ) -> ClassificationResult:
-    """Load graph caches, split by UniProt accession, fit, and save a run."""
+    """Cluster homologous proteins before splitting, fit, and save a run."""
     root = add_project_sources(project_root)
     from abstractgraph_graphicalizer.protein import ProteinLabelGraphicalizer, read_graph_pickle
     from simplex_pair_vectorizer import SimplexPairGraphVectorizer
@@ -171,8 +383,23 @@ def run_classifier(
     if dataset.empty:
         raise RuntimeError("No completed graph files found for the active manifest")
 
+    accessions = dataset["uniprot_accession"].astype(str)
+    if accessions.eq("").any():
+        raise ValueError("The active manifest has proteins without UniProt accessions")
+    _require_mmseqs()
+    sequence_cache = root / "data" / "interim" / "uniprot_sequences.tsv"
+    sequences = _fetch_uniprot_sequences(accessions, sequence_cache)
+    homology_groups = _sequence_homology_groups(
+        accessions,
+        sequences,
+        root / "data" / "interim" / "sequence_homology",
+        min_sequence_identity=homology_min_sequence_identity,
+        min_coverage=homology_min_coverage,
+        n_jobs=n_jobs,
+    )
+    dataset["homology_cluster"] = accessions.map(homology_groups)
+    groups = dataset["homology_cluster"].astype(str).to_numpy()
     y = dataset["ec_number"].astype(str).to_numpy()
-    groups = dataset["uniprot_accession"].astype(str).to_numpy()
     counts = pd.Series(y).value_counts().sort_index()
     if len(counts) < 2:
         only_class = counts.index[0] if len(counts) else "none"
@@ -183,8 +410,15 @@ def run_classifier(
             "cell, and wait for it to finish before running notebook 03. Run notebook 02 "
             "if the selected dataset does not already have graph caches."
         )
-    class_group_counts = dataset.groupby("ec_number")["uniprot_accession"].nunique().sort_index()
+    class_group_counts = (
+        dataset.groupby("ec_number")["homology_cluster"].nunique().sort_index()
+    )
     train_only_classes = class_group_counts[class_group_counts < 2].index.astype(str).tolist()
+    print(
+        "Homology grouping: MMseqs2, "
+        f">={homology_min_sequence_identity:.0%} sequence identity over "
+        f">={homology_min_coverage:.0%} of the shorter sequence"
+    )
 
     train_idx, test_idx, split_strategy = _grouped_train_test_split(
         y,
@@ -192,6 +426,11 @@ def run_classifier(
         test_size=test_size,
         random_state=random_state,
     )
+    overlap = set(groups[train_idx]) & set(groups[test_idx])
+    if overlap:
+        raise RuntimeError(
+            f"Homology leakage detected: {len(overlap)} sequence clusters occur in both splits"
+        )
     test_absent_classes = sorted(set(y) - set(y[test_idx]))
     if test_absent_classes:
         warnings.warn(
@@ -469,13 +708,24 @@ def run_classifier(
     run_dir = root / "results" / f"ec_level_{ec_level}_{run_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
     predictions = dataset.iloc[test_idx][
-        ["sample_id", "pdb_id", "label_asym_id", "uniprot_accession", "ec_number", "protein_name", "graph_path"]
+        [
+            "sample_id",
+            "pdb_id",
+            "label_asym_id",
+            "uniprot_accession",
+            "homology_cluster",
+            "ec_number",
+            "protein_name",
+            "graph_path",
+        ]
     ].copy()
     predictions["y_true"] = y_test
     predictions["y_pred"] = y_pred
     predictions["correct"] = predictions["y_true"] == predictions["y_pred"]
     predictions.to_csv(run_dir / "predictions.tsv", sep="\t", index=False)
-    split_assignments = dataset[["sample_id", "uniprot_accession", "ec_number"]].copy()
+    split_assignments = dataset[
+        ["sample_id", "uniprot_accession", "homology_cluster", "ec_number"]
+    ].copy()
     split_assignments["split"] = "train"
     split_assignments.loc[test_idx, "split"] = "test"
     split_assignments.to_csv(run_dir / "train_test_split.tsv", sep="\t", index=False)
@@ -521,6 +771,9 @@ def run_classifier(
         "manifest_path": str(manifest_path),
         "target": "ec_number",
         "split_strategy": split_strategy,
+        "homology_tool": "MMseqs2 easy-cluster",
+        "homology_min_sequence_identity": homology_min_sequence_identity,
+        "homology_min_coverage_of_shorter_sequence": homology_min_coverage,
         "test_size_requested": test_size,
         "random_state": random_state,
         "node_label_alphabet": node_label_alphabet,
@@ -534,7 +787,7 @@ def run_classifier(
         "train_samples": int(len(train_idx)),
         "test_samples": int(len(test_idx)),
         "test_absent_classes": test_absent_classes,
-        "train_test_group_overlap": sorted(set(groups[train_idx]) & set(groups[test_idx])),
+        "train_test_homology_cluster_overlap": sorted(overlap),
         "accuracy": accuracy,
         "balanced_accuracy": balanced_accuracy,
     }
@@ -546,7 +799,7 @@ def run_classifier(
     return ClassificationResult(
         dataset=dataset,
         class_counts=counts.rename("samples").to_frame(),
-        class_group_counts=class_group_counts.rename("uniprot_groups").to_frame(),
+        class_group_counts=class_group_counts.rename("homology_clusters").to_frame(),
         train_only_classes=train_only_classes,
         train_counts=pd.Series(y_train).value_counts().sort_index().rename("train_samples").to_frame(),
         test_counts=pd.Series(y_test).value_counts().sort_index().rename("test_samples").to_frame(),

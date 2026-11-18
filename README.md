@@ -34,9 +34,10 @@ The `notebooks/` workflow has four stages:
    and selects up to a configured number of UniProt proteins per class.
 2. `02_build_protein_graph_dataset.ipynb` downloads RCSB mmCIF files and saves
    chain-level protein contact graphs plus resumable build status.
-3. `03_train_test_ec_classifier.ipynb` loads the graph cache and trains a
-   grouped train/test classifier using the simplex-pair features, with square
-   confusion-matrix, ROC, and precision–recall plots.
+3. `03_train_test_ec_classifier.ipynb` loads the graph cache, clusters protein
+   sequences for a homology-aware train/test split, and trains a classifier
+   using the simplex-pair features, with square confusion-matrix, ROC, and
+   precision–recall plots.
 4. `04_visualize_ec_proteins_2d.ipynb` vectorizes the same cached graphs and
    visualizes them with the sibling `IteratedMinimumSpanningTreeEmbedder`.
 
@@ -52,6 +53,21 @@ python -m pip install -e '../abstractgraph-ecosystem/repos/abstractgraph-graphic
 python -m pip install -e '../IteratedMinimumSpanningTree[notebook]'
 ```
 
+Notebook 03 also requires [MMseqs2](https://github.com/soedinglab/MMseqs2) on
+`PATH`. Install it with one of:
+
+```bash
+brew install mmseqs2
+# or
+conda install -c conda-forge -c bioconda mmseqs2
+```
+
+It fetches and caches canonical UniProt sequences, then
+groups proteins sharing at least 30% sequence identity across at least 80% of
+the shorter sequence. Each sequence cluster is kept entirely in train or test;
+the run records the cluster assignments and verifies that the two splits have
+no cluster overlap.
+
 Notebook 04 uses IMSTE's transductive `fit_transform` interface on the sparse
 simplex-pair feature matrix, then renders an interactive Plotly scatter with EC
 class toggles and protein metadata on hover. The feature matrix and coordinates
@@ -66,11 +82,12 @@ structures are downloaded concurrently by PDB entry, then contact graphs are
 built concurrently by protein chain; adjust `N_JOBS` and `DOWNLOAD_JOBS` in
 notebook 02 to fit the machine.
 
-The default EC source is UniProtKB (human proteins with PDB cross-references);
+The default EC source is UniProtKB (proteins from any organism with PDB cross-references);
 PDBe maps each selected accession and PDB entry to a chain, and the graphicalizer
 downloads the corresponding structure from RCSB. The manifest contains one
 chain per UniProt accession with exactly one EC prefix at the selected level.
-This keeps labels unambiguous and provides a protein grouping key for the split.
+This keeps labels unambiguous and lets the classifier cluster homologous
+sequences before splitting.
 Edit the first notebook's settings to change organism, EC level, selected ECs,
 or number of proteins per EC. UniProt responses, PDBe chain mappings, and a
 manifest with matching settings are reused on reruns. Set REBUILD_MANIFEST in
