@@ -127,6 +127,8 @@ def sample_simplex_pair(
     rng: random.Random,
 ) -> SimplexPair | None:
     """Sample a representative pair and assigned cliques inside the ranges."""
+    from simplex_pair_vectorizer.vectorizer import _bounded_shortest_path_lengths
+
     if min_distance < 0 or max_distance < min_distance:
         raise ValueError("distance range must satisfy 0 <= min_distance <= max_distance")
     if min_simplex_size < 1 or max_simplex_size < min_simplex_size:
@@ -150,11 +152,9 @@ def sample_simplex_pair(
         return None
     representative_order = {node: index for index, node in enumerate(graph.nodes)}
     representative_pairs: list[tuple[Any, Any]] = []
+    distances = _bounded_shortest_path_lengths(graph, representatives, max_distance)
     for left_representative in representatives:
-        lengths = nx.single_source_shortest_path_length(
-            graph, left_representative, cutoff=max_distance
-        )
-        for right_representative, path_length in lengths.items():
+        for right_representative, path_length in distances[left_representative].items():
             if (
                 min_distance <= path_length <= max_distance
                 and right_representative in by_representative

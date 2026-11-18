@@ -105,6 +105,31 @@ def _pair_distance_bounds(value: Any) -> tuple[float, float]:
     return minimum, maximum
 
 
+def _bounded_shortest_path_lengths(
+    graph: nx.Graph,
+    sources: Iterable[Any],
+    max_hops: int,
+) -> dict[Any, dict[Any, int]]:
+    """Get bounded path lengths, using direct lookups for zero and one hop."""
+    if max_hops <= 0:
+        return {source: {source: 0} for source in sources}
+    if max_hops == 1:
+        result = {}
+        for source in sources:
+            distances = {source: 0}
+            distances.update(
+                (neighbor, 1)
+                for neighbor in graph.neighbors(source)
+                if neighbor != source
+            )
+            result[source] = distances
+        return result
+    return {
+        source: nx.single_source_shortest_path_length(graph, source, cutoff=max_hops)
+        for source in sources
+    }
+
+
 def _simplex_hash(
     graph: nx.Graph,
     simplex: Sequence[Any],
@@ -207,10 +232,7 @@ def _graph_counts(
     representative_order = {node: index for index, node in enumerate(ordered_nodes)}
     # Each clique belongs to exactly one canonical representative. Pairs of
     # representatives can be distant, so their cliques need not intersect.
-    distances = {
-        source: nx.single_source_shortest_path_length(graph, source, cutoff=max_hops)
-        for source in representatives
-    }
+    distances = _bounded_shortest_path_lengths(graph, representatives, max_hops)
     counts: Counter[str] = Counter()
     for left_representative in representatives:
         left_indices = by_representative[left_representative]
