@@ -28,7 +28,7 @@ features = vectorizer.fit_transform([graph])  # scipy CSR matrix
 
 ## Enzyme classification notebooks
 
-The `notebooks/` workflow has six stages:
+The `notebooks/` directory contains five workflow notebooks and three performance experiments:
 
 1. `01_select_ec_proteins.ipynb` lists PDB-linked EC classes at a chosen level
    and selects up to a configured number of UniProt proteins per class.
@@ -44,6 +44,10 @@ The `notebooks/` workflow has six stages:
    and interactively highlights a randomly sampled representative-pair feature.
 6. `06_benchmark_clique_enumeration.ipynb` compares the fast bounded clique
    enumerator with NetworkX's generic enumerator on cached protein graphs.
+7. `07_compiled_vectorizer_experiment.ipynb` profiles full vectorization and
+   compares Numba pair-loop compilation with native JSON serialization.
+8. `08_benchmark_abstractgraph_hashing.ipynb` compares the current feature
+   hashes with an AbstractGraph-style SHA-256 implementation.
 
 Notebook 03 defaults to XGBoost's parallel histogram classifier. It consumes
 the vectorizer's sparse CSR matrix directly; `N_JOBS = -1` uses all available
@@ -153,3 +157,7 @@ transform returns a CSR matrix unless dense=True. Set n_jobs=1 for sequential
 processing or use a joblib value such as -1 for parallel graph conversion.
 cache_graphs=True retains per-object results for repeated transforms; mutate
 graphs only when caching is disabled or refit afterward.
+
+Canonical feature payloads are serialized with `orjson` before BLAKE2b hashing.
+The package falls back to Python's standard JSON encoder if `orjson` cannot
+encode a value, including integers outside its supported range.

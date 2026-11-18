@@ -17,6 +17,11 @@ from scipy.sparse import csr_matrix
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
+try:
+    import orjson
+except ImportError:  # pragma: no cover - fallback for source-only/minimal environments
+    orjson = None
+
 FAST_CLIQUE_MAX_SIMPLEX_DIMENSION = 3
 
 
@@ -42,7 +47,20 @@ def _normal_form(value: Any) -> Any:
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(_normal_form(value), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    normalized = _normal_form(value)
+    if orjson is not None:
+        try:
+            return orjson.dumps(normalized).decode("utf-8")
+        except (TypeError, OverflowError):
+            pass
+    # orjson has a signed 64-bit integer limit; preserve the generic
+    # vectorizer API for larger Python integers via the stdlib encoder.
+    return json.dumps(
+        normalized,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _validate_graph(graph: Any) -> nx.Graph:
