@@ -240,7 +240,7 @@ def draw_protein_feature(
             coordinates,
             name="Other contact edges",
             color="rgba(0,0,0,0.3)",
-            width=3.0,
+            width=1.2,
             showlegend=False,
         )
     ]
