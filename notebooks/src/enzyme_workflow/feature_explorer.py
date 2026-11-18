@@ -230,7 +230,7 @@ def draw_protein_feature(
             background_edges,
             coordinates,
             name="Other contact edges",
-            color="rgba(160,175,195,0.12)",
+            color="rgba(120,135,155,0.3)",
             width=1.4,
             showlegend=False,
         )
@@ -274,7 +274,7 @@ def draw_protein_feature(
             )
         )
 
-    add_node_trace(background_nodes, name="Other residues", opacity=0.16, size=3.0, outline="rgba(0,0,0,0)")
+    add_node_trace(background_nodes, name="Other residues", opacity=0.3, size=3.0, outline="rgba(0,0,0,0)")
 
     edge_a_only = {edge for edge in highlighted_edges_a if edge not in highlighted_edges_b}
     edge_b_only = {edge for edge in highlighted_edges_b if edge not in highlighted_edges_a}
@@ -298,7 +298,7 @@ def draw_protein_feature(
             representatives,
             ("#FFB000", "#00D5FF"),
             ("Anchor A", "Anchor B"),
-            ("diamond", "square"),
+            ("circle", "circle"),
         ):
             xyz = coordinates[representative]
             representative_label = str(graph.nodes[representative].get("label", "UNK"))
@@ -322,13 +322,16 @@ def draw_protein_feature(
     figure = go.Figure(data=traces)
     figure.update_layout(
         title={"text": title, "x": 0.02, "xanchor": "left"},
-        template="plotly_dark",
+        template="plotly_white",
+        paper_bgcolor="white",
+        plot_bgcolor="white",
         height=780,
         margin={"l": 0, "r": 0, "t": 90, "b": 0},
         legend={"orientation": "h", "y": 1.02, "x": 0.02},
         scene={
             "aspectmode": "data",
             "dragmode": "orbit",
+            "bgcolor": "white",
             "xaxis": {"visible": False},
             "yaxis": {"visible": False},
             "zaxis": {"visible": False},
