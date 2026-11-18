@@ -30,6 +30,7 @@ def run_selection(
     human_only: bool = True,
     selected_ec_numbers: list[str] | None = None,
     random_state: int = 42,
+    mapping_jobs: int = 8,
     refresh_uniprot_cache: bool = False,
     rebuild_manifest: bool = False,
 ) -> SelectionResult:
@@ -80,14 +81,22 @@ def run_selection(
         print(f"Reusing saved manifest: {manifest_path}")
     else:
         total_classes = len(selected_ec_numbers) if selected_ec_numbers else len(available)
+        print(f"Concurrent PDBe mapping workers: {mapping_jobs}")
         with tqdm(total=total_classes, desc="Mapping EC classes to PDB chains", unit="EC") as bar:
 
             def update_progress(event: dict[str, Any]) -> None:
-                bar.update(1)
-                bar.set_postfix(
-                    ec=event["ec_number"],
-                    proteins=f"{event['selected']}/{event['requested']}",
-                )
+                if event.get("phase") == "batch":
+                    bar.set_postfix(
+                        ec=event["ec_number"],
+                        candidates=f"{event['completed_candidates']}/{event['total_candidates']}",
+                        proteins=f"{event['selected']}/{event['requested']}",
+                    )
+                else:
+                    bar.update(1)
+                    bar.set_postfix(
+                        ec=event["ec_number"],
+                        proteins=f"{event['selected']}/{event['requested']}",
+                    )
 
             rows = select_ec_protein_manifest(
                 records,
@@ -95,6 +104,7 @@ def run_selection(
                 proteins_per_ec=proteins_per_ec,
                 selected_ec_numbers=selected_ec_numbers,
                 random_state=random_state,
+                mapping_jobs=mapping_jobs,
                 mapping_cache_path=mapping_cache,
                 output_path=manifest_path,
                 progress=update_progress,

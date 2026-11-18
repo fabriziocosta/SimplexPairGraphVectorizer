@@ -6,8 +6,10 @@ import csv
 import json
 import random
 import re
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -172,7 +174,10 @@ def _load_mapping_cache(path: Path) -> dict[str, Any]:
 def _save_mapping_cache(path: Path, cache: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.write_text(
+        json.dumps(cache, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
     temporary.replace(path)
 
 
@@ -181,19 +186,31 @@ def _mapping_for_accession(
     pdb_id: str,
     accession: str,
     cache: dict[str, Any],
-    cache_path: Path,
     timeout_seconds: int,
+    *,
+    cache_lock: threading.Lock,
+    pdb_locks: dict[str, threading.Lock],
 ) -> dict[str, Any] | None:
-    if pdb_id not in cache:
-        response = session.get(
-            PDBE_UNIPROT_MAPPING_URL.format(pdb_id=pdb_id),
-            timeout=timeout_seconds,
-        )
-        response.raise_for_status()
-        cache[pdb_id] = response.json()
-        _save_mapping_cache(cache_path, cache)
+    # Serialize requests per PDB ID to avoid duplicate downloads when several
+    # UniProt records reference the same structure, while allowing unrelated
+    # PDB mappings to be fetched concurrently.
+    with cache_lock:
+        pdb_lock = pdb_locks.setdefault(pdb_id, threading.Lock())
+    with pdb_lock:
+        with cache_lock:
+            has_mapping = pdb_id in cache
+            pdb_mapping = cache.get(pdb_id)
+        if not has_mapping:
+            response = session.get(
+                PDBE_UNIPROT_MAPPING_URL.format(pdb_id=pdb_id),
+                timeout=timeout_seconds,
+            )
+            response.raise_for_status()
+            pdb_mapping = response.json()
+            with cache_lock:
+                cache[pdb_id] = pdb_mapping
 
-    mapping_data = cache[pdb_id].get(pdb_id, {}).get("UniProt", {}).get(accession, {})
+    mapping_data = pdb_mapping.get(pdb_id, {}).get("UniProt", {}).get(accession, {})
     mappings = mapping_data.get("mappings", [])
     if not mappings:
         return None
@@ -229,6 +246,7 @@ def select_ec_protein_manifest(
     output_path: str | Path,
     timeout_seconds: int = 30,
     sleep_seconds: float = 0.05,
+    mapping_jobs: int = 8,
     progress: Callable[[dict[str, Any]], None] | None = None,
     verbose: bool = True,
 ) -> list[dict[str, Any]]:
@@ -246,6 +264,8 @@ def select_ec_protein_manifest(
         raise ValueError("proteins_per_ec must be at least one")
     if level not in (1, 2, 3, 4):
         raise ValueError("level must be between 1 and 4")
+    if mapping_jobs < 1:
+        raise ValueError("mapping_jobs must be at least one")
 
     candidates_by_ec: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in records:
@@ -262,9 +282,12 @@ def select_ec_protein_manifest(
 
     ec_numbers = sorted(selected_ec_numbers) if selected_ec_numbers else sorted(candidates_by_ec)
     rng = random.Random(random_state)
-    session = _session()
     cache_path = Path(mapping_cache_path)
     mapping_cache = _load_mapping_cache(cache_path)
+    saved_mapping_count = len(mapping_cache)
+    cache_lock = threading.Lock()
+    pdb_locks: dict[str, threading.Lock] = {}
+    session_local = threading.local()
     output = Path(output_path)
     working_output = output.with_suffix(output.suffix + ".building")
     manifest: list[dict[str, Any]] = []
@@ -273,68 +296,112 @@ def select_ec_protein_manifest(
         "ec_number", "ec_level", "uniprot_accession", "ec_numbers",
         "protein_name", "organism", "mapping_identity", "mapping_coverage",
     ]
+    seen_sample_ids: set[str] = set()
 
-    for ec_index, ec_number in enumerate(ec_numbers, start=1):
-        candidate_rows = list(candidates_by_ec.get(ec_number, []))
-        rng.shuffle(candidate_rows)
-        class_rows: list[dict[str, Any]] = []
-        for row in candidate_rows:
-            if len(class_rows) >= proteins_per_ec:
-                break
-            accession = row["Entry"].strip()
-            pdb_ids = _pdb_ids(row.get("PDB", ""))
-            rng.shuffle(pdb_ids)
-            chosen_mapping = None
-            for pdb_id in pdb_ids:
-                try:
-                    chosen_mapping = _mapping_for_accession(
-                        session,
-                        pdb_id,
-                        accession,
-                        mapping_cache,
-                        cache_path,
-                        timeout_seconds,
-                    )
-                except requests.RequestException as exc:
-                    if verbose:
-                        print(f"Mapping failed for {pdb_id}/{accession}: {exc}")
-                    continue
-                if chosen_mapping is not None:
+    with ThreadPoolExecutor(max_workers=mapping_jobs) as executor:
+        for ec_index, ec_number in enumerate(ec_numbers, start=1):
+            candidate_rows = list(candidates_by_ec.get(ec_number, []))
+            rng.shuffle(candidate_rows)
+            candidate_jobs = []
+            for row in candidate_rows:
+                pdb_ids = _pdb_ids(row.get("PDB", ""))
+                rng.shuffle(pdb_ids)
+                candidate_jobs.append((row, pdb_ids))
+            class_rows: list[dict[str, Any]] = []
+            batch_size = max(16, mapping_jobs * 2)
+
+            def resolve_candidate(job: tuple[dict[str, str], list[str]]) -> dict[str, Any] | None:
+                row, pdb_ids = job
+                accession = row["Entry"].strip()
+                session = getattr(session_local, "session", None)
+                if session is None:
+                    session = _session()
+                    session_local.session = session
+                for pdb_id in pdb_ids:
+                    try:
+                        chosen = _mapping_for_accession(
+                            session,
+                            pdb_id,
+                            accession,
+                            mapping_cache,
+                            timeout_seconds,
+                            cache_lock=cache_lock,
+                            pdb_locks=pdb_locks,
+                        )
+                    except requests.RequestException as exc:
+                        if verbose:
+                            print(f"Mapping failed for {pdb_id}/{accession}: {exc}")
+                        continue
+                    if chosen is not None:
+                        return chosen
+                    if sleep_seconds:
+                        time.sleep(sleep_seconds)
+                return None
+
+            for start in range(0, len(candidate_jobs), batch_size):
+                if len(class_rows) >= proteins_per_ec:
                     break
-                if sleep_seconds:
-                    time.sleep(sleep_seconds)
-            if chosen_mapping is None:
-                continue
-            sample_id = f"{chosen_mapping['pdb_id']}.{chosen_mapping['label_asym_id']}"
-            if any(existing["sample_id"] == sample_id for existing in manifest + class_rows):
-                continue
-            ec_terms = sorted(term.strip() for term in row.get("EC number", "").split(";") if term.strip())
-            class_rows.append(
-                {
-                    "sample_id": sample_id,
-                    **chosen_mapping,
-                    "ec_number": ec_number,
-                    "ec_level": level,
-                    "uniprot_accession": accession,
-                    "ec_numbers": ";".join(ec_terms),
-                    "protein_name": row.get("Protein names", ""),
-                    "organism": row.get("Organism", ""),
-                }
-            )
-        manifest.extend(class_rows)
-        _write_tsv(working_output, manifest, fieldnames)
-        if progress is not None:
-            progress(
-                {
-                    "ec_number": ec_number,
-                    "selected": len(class_rows),
-                    "requested": proteins_per_ec,
-                    "completed_ec_classes": ec_index,
-                    "total_ec_classes": len(ec_numbers),
-                }
-            )
-        if verbose:
-            print(f"EC {ec_number}: selected {len(class_rows)}/{proteins_per_ec} proteins")
+                batch = candidate_jobs[start : start + batch_size]
+                mappings = list(executor.map(resolve_candidate, batch))
+                for (row, _), chosen_mapping in zip(batch, mappings):
+                    if chosen_mapping is None:
+                        continue
+                    sample_id = f"{chosen_mapping['pdb_id']}.{chosen_mapping['label_asym_id']}"
+                    if sample_id in seen_sample_ids:
+                        continue
+                    accession = row["Entry"].strip()
+                    ec_terms = sorted(
+                        term.strip() for term in row.get("EC number", "").split(";") if term.strip()
+                    )
+                    class_rows.append(
+                        {
+                            "sample_id": sample_id,
+                            **chosen_mapping,
+                            "ec_number": ec_number,
+                            "ec_level": level,
+                            "uniprot_accession": accession,
+                            "ec_numbers": ";".join(ec_terms),
+                            "protein_name": row.get("Protein names", ""),
+                            "organism": row.get("Organism", ""),
+                        }
+                    )
+                    seen_sample_ids.add(sample_id)
+                    if len(class_rows) >= proteins_per_ec:
+                        break
+                cache_size = len(mapping_cache)
+                if cache_size - saved_mapping_count >= 100:
+                    _save_mapping_cache(cache_path, mapping_cache)
+                    saved_mapping_count = cache_size
+                if progress is not None:
+                    progress(
+                        {
+                            "phase": "batch",
+                            "ec_number": ec_number,
+                            "completed_candidates": min(start + len(batch), len(candidate_jobs)),
+                            "total_candidates": len(candidate_jobs),
+                            "selected": len(class_rows),
+                            "requested": proteins_per_ec,
+                        }
+                    )
+
+            manifest.extend(class_rows)
+            if len(mapping_cache) > saved_mapping_count:
+                _save_mapping_cache(cache_path, mapping_cache)
+                saved_mapping_count = len(mapping_cache)
+            _write_tsv(working_output, manifest, fieldnames)
+            if progress is not None:
+                progress(
+                    {
+                    "phase": "complete",
+                        "ec_number": ec_number,
+                        "selected": len(class_rows),
+                        "requested": proteins_per_ec,
+                        "completed_ec_classes": ec_index,
+                        "total_ec_classes": len(ec_numbers),
+                    }
+                )
+            if verbose:
+                print(f"EC {ec_number}: selected {len(class_rows)}/{proteins_per_ec} proteins")
 
     working_output.replace(output)
     return manifest
