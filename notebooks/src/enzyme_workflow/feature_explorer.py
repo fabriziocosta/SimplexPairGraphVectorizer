@@ -343,7 +343,7 @@ def display_feature_explorer(
     *,
     max_anchor_distance: int = 6,
     max_simplex_size: int = 4,
-):
+) -> None:
     """Display the widget-driven protein and anchor-paired simplex explorer."""
     import ipywidgets as widgets
     from IPython.display import Markdown, clear_output, display
@@ -466,4 +466,3 @@ def display_feature_explorer(
     )
     display(controls)
     random_protein()
-    return controls
