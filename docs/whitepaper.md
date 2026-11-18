@@ -2,7 +2,7 @@
 
 ## Abstract
 
-The vectorizer maps a labeled graph to counts of pairs of labeled clique patterns. Each occurrence starts from an unordered pair of anchor vertices at a selected shortest-path distance. Every clique containing one anchor can pair with every clique containing the other anchor; the cliques need not share any vertex. At distance zero, both clique collections are associated with the same anchor.
+The vectorizer maps a labeled graph to counts of pairs of labeled clique patterns. Each occurrence starts from an unordered pair of representative vertices at a selected shortest-path distance. Every clique is assigned to exactly one representative, then cliques assigned to the two representatives are paired. The paired cliques need not share any vertex. At distance zero, both cliques come from the same representative's collection.
 
 ## Labeled graph and simplices
 
@@ -10,31 +10,31 @@ Let $G=(V,E,\ell_V,\ell_E)$ be a finite, simple, undirected graph with vertex an
 
 $$\mathcal{C}_{q}(G)=\{\sigma\subseteq V:1\leq |\sigma|\leq q+1,\ \forall u,v\in\sigma,\ u\ne v\Rightarrow\{u,v\}\in E\}.$$
 
-For each vertex $u$, its associated simplex collection is
+Each simplex $\sigma$ has one canonical representative $\rho(\sigma)$: its lowest vertex under a fixed stable node ordering. Its associated simplex collection is
 
-$$\mathcal{C}_{q}(G;u)=\{\sigma\in\mathcal{C}_{q}(G):u\in\sigma\}.$$
+$$\mathcal{C}_{q}(G;u)=\{\sigma\in\mathcal{C}_{q}(G):\rho(\sigma)=u\}.$$
 
-Every graph vertex with at least one associated simplex can serve as an anchor. A clique is therefore represented once for each of its vertices, with that vertex marked as the anchor in the corresponding type.
+Thus a clique belongs to exactly one representative's collection, even though its other vertices may be representatives of different cliques.
 
-## Anchored simplex types
+## Representative-marked simplex types
 
-Write $\kappa_G(\sigma,u)$ for the type of simplex $\sigma$ anchored at $u\in\sigma$. This type marks the anchor's vertex label, hashes the labels of all simplex vertices, and hashes every induced edge together with the hashes of its two endpoint nodes. The node and edge signature lists are sorted before hashing, so the type does not depend on incidental iteration order.
+Write $\kappa_G(\sigma,u)$ for the type of simplex $\sigma$ represented by $u=\rho(\sigma)$. This type marks the representative's vertex label, hashes the labels of all simplex vertices, and hashes every induced edge together with the hashes of its two endpoint nodes. The node and edge signature lists are sorted before hashing, so the type does not depend on incidental iteration order.
 
-## Anchor pairs and feature occurrences
+## Representative pairs and feature occurrences
 
-An anchor pair $\{u,v\}$ is unordered. Its distance is the unweighted shortest-path distance in the full graph, $d_G(u,v)$. It is eligible when
+An unordered pair of representative vertices $\{u,v\}$ has unweighted shortest-path distance $d_G(u,v)$ in the full graph. It is eligible when
 
 $$L\leq d_G(u,v)+\varepsilon\leq U,$$
 
-where $\varepsilon$ is an optional nonnegative offset (zero by default). For each eligible anchor pair, take the Cartesian product of the associated simplex collections. At distance zero, $u=v$ and the pair of simplices is unordered, with replacement when self-pairs are enabled. At positive distance, a simplex containing $u$ is paired with a simplex containing $v$; the two simplices may be disjoint, overlap, or be identical if both contain both anchors. When self-pairs are disabled, identical simplex pairs are omitted.
+where $\varepsilon$ is an optional nonnegative offset (zero by default). For each eligible representative pair, take the Cartesian product of $\mathcal{C}_q(G;u)$ and $\mathcal{C}_q(G;v)$. At distance zero, $u=v$ and the pair of simplices is unordered, with replacement when self-pairs are enabled. At positive distance, the two simplices may be disjoint or overlap. Since each clique is assigned once, a clique cannot be paired with itself across two different representatives. When self-pairs are disabled, identical cliques are omitted at distance zero.
 
 The symbolic feature for an occurrence is
 
 $$\phi_G(\{u,v\},\sigma,\tau)=\left(\left[\kappa_G(\sigma,u),\kappa_G(\tau,v)\right]_{\mathrm{unordered}},\ d_G(u,v)+\varepsilon\right).$$
 
-The unordered pair of anchored simplex types is canonicalized by sorting its two members. This also makes anchor ordering immaterial: swapping $u,v$ and their associated simplices gives the same feature.
+The unordered pair of representative-marked simplex types is canonicalized by sorting its two members. This makes representative ordering immaterial: swapping $u,v$ and their associated simplices gives the same feature.
 
-For a fixed anchor $u$, this construction includes every eligible anchor vertex $v$ within the configured distance range and every clique associated with each anchor. In particular, when $u=v$, it pairs the simplices associated with that single vertex.
+For a fixed representative $u$, this construction includes every eligible representative $v$ within the configured distance range and every clique assigned to each representative. In particular, when $u=v$, it pairs the cliques assigned to that single representative.
 
 ## Graph-level feature counts
 
@@ -42,7 +42,7 @@ Let $s\in\{0,1\}$ specify whether self-pairs are included, and let $\preceq$ be 
 
 $$c_G(\phi)=\sum_{u\preceq v\in V}\ \sum_{\sigma\in\mathcal{C}_q(G;u)}\ \sum_{\tau\in\mathcal{C}_q(G;v)}\mathbf{1}[L\leq d_G(u,v)+\varepsilon\leq U]\,\mathbf{1}[\phi=\phi_G(\{u,v\},\sigma,\tau)]\,\mathbf{1}[\mathrm{allowed}_s(\sigma,\tau)].$$
 
-For $u=v$, the simplex-pair sum is unordered: each pair is counted once, with identical simplices allowed exactly when $s=1$. For $u\ne v$, the anchor pair is visited once in a stable vertex order and the full Cartesian product is taken. Repeated feature types arising at different anchors or in different graph regions add to the same count.
+For $u=v$, the simplex-pair sum is unordered: each pair is counted once, with identical simplices allowed exactly when $s=1$. For $u\ne v$, the representative pair is visited once in a stable vertex order and the full Cartesian product is taken. Repeated feature types arising at different representative pairs add to the same count.
 
 The resulting uncompressed representation is the count function $c_G:\mathcal{F}\rightarrow\mathbb{N}_0$. It is a sparse vector for any finite graph.
 
@@ -56,8 +56,8 @@ Hash collisions add their occurrence counts. The representation does not normali
 
 ## Protein contact graph interpretation
 
-In the enzyme workflow, a graph vertex represents a C$\alpha$ atom from a selected protein chain, and an edge represents a residue pair within the selected spatial contact window. Vertex labels encode amino-acid categories, while edge labels encode contact labels or optional distance bins. The vectorizer forms anchor pairs using shortest-path hops through this contact graph; these hops are distinct from spatial distances in ångströms.
+In the enzyme workflow, a graph vertex represents a C$\alpha$ atom from a selected protein chain, and an edge represents a residue pair within the selected spatial contact window. Vertex labels encode amino-acid categories, while edge labels encode contact labels or optional distance bins. The vectorizer forms representative pairs using shortest-path hops through this contact graph; these hops are distinct from spatial distances in ångströms.
 
 ## Interpretation and scope
 
-Each coordinate aggregates evidence for pairs of locally labeled clique patterns anchored at vertices separated by a selected graph distance. The construction preserves node labels, induced edge labels, anchor positions within cliques, and graph-scale separation. It is a summary rather than a lossless graph encoding: distinct graphs can yield the same counts, and the fixed-width hash can merge distinct symbolic features. Stable node ordering makes enumeration deterministic; it does not restrict which vertices may anchor a clique.
+Each coordinate aggregates evidence for pairs of locally labeled clique patterns assigned to representative vertices separated by a selected graph distance. The construction preserves node labels, induced edge labels, representative positions within cliques, and graph-scale separation. It is a summary rather than a lossless graph encoding: distinct graphs can yield the same counts, and the fixed-width hash can merge distinct symbolic features. Stable node ordering selects one representative for each clique and makes enumeration deterministic.

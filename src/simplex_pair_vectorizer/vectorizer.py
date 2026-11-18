@@ -1,4 +1,4 @@
-"""Scikit-learn transformer for anchor-paired labeled graph cliques."""
+"""Scikit-learn transformer for representative-paired labeled graph cliques."""
 
 from __future__ import annotations
 
@@ -143,61 +143,59 @@ def _graph_counts(
             break
         simplices.append(tuple(sorted(clique, key=node_keys.__getitem__)))
 
-    by_anchor: dict[Any, list[int]] = {node: [] for node in graph.nodes}
+    by_representative: dict[Any, list[int]] = {node: [] for node in graph.nodes}
     for simplex_index, simplex in enumerate(simplices):
-        for anchor in simplex:
-            by_anchor[anchor].append(simplex_index)
+        by_representative[simplex[0]].append(simplex_index)
 
     jitter = 0.0 if distance_jitter in (None, "auto") else float(distance_jitter)
     max_hops = math.floor(max_distance - jitter)
     if max_hops < 0:
         return Counter()
 
-    anchored_simplex_hashes = [
-        {
-            anchor: _simplex_hash(
-                graph, simplex, anchor, node_label_key, edge_label_key
-            )
-            for anchor in simplex
-        }
+    simplex_hashes = [
+        _simplex_hash(
+            graph, simplex, simplex[0], node_label_key, edge_label_key
+        )
         for simplex in simplices
     ]
 
-    anchors = [node for node in ordered_nodes if by_anchor[node]]
-    anchor_order = {node: index for index, node in enumerate(ordered_nodes)}
-    # Every vertex anchors all simplices that contain it. Anchor pairs can be
-    # disjoint from the paired simplices' other vertices and are unordered.
+    representatives = [node for node in ordered_nodes if by_representative[node]]
+    representative_order = {node: index for index, node in enumerate(ordered_nodes)}
+    # Each clique belongs to exactly one canonical representative. Pairs of
+    # representatives can be distant, so their cliques need not intersect.
     distances = {
         source: nx.single_source_shortest_path_length(graph, source, cutoff=max_hops)
-        for source in anchors
+        for source in representatives
     }
     counts: Counter[str] = Counter()
-    for left_anchor in anchors:
-        left_indices = by_anchor[left_anchor]
-        for right_anchor, path_length in distances[left_anchor].items():
-            right_indices = by_anchor.get(right_anchor)
-            if not right_indices or anchor_order[right_anchor] < anchor_order[left_anchor]:
+    for left_representative in representatives:
+        left_indices = by_representative[left_representative]
+        for right_representative, path_length in distances[left_representative].items():
+            right_indices = by_representative.get(right_representative)
+            if (
+                not right_indices
+                or representative_order[right_representative] < representative_order[left_representative]
+            ):
                 continue
             distance = float(path_length) + jitter
             if distance < min_distance or distance > max_distance:
                 continue
             for left_position, left_index in enumerate(left_indices):
-                # At distance zero both sides use the same anchor, so form
-                # unordered clique pairs there. Distinct anchors use the full
-                # Cartesian product: each side is associated with its anchor.
-                start = left_position if left_anchor == right_anchor else 0
+                # At distance zero, form unordered clique pairs. Distinct
+                # representatives use the full Cartesian product.
+                start = left_position if left_representative == right_representative else 0
                 for right_index in right_indices[start:]:
                     if left_index == right_index and not include_self:
                         continue
                     simplex_pair = sorted(
                         (
-                            anchored_simplex_hashes[left_index][left_anchor].hex(),
-                            anchored_simplex_hashes[right_index][right_anchor].hex(),
+                            simplex_hashes[left_index].hex(),
+                            simplex_hashes[right_index].hex(),
                         )
                     )
                     feature = _canonical_json(
                         {
-                            "kind": "simplex_pair_v4",
+                            "kind": "simplex_pair_v5",
                             "simplices": simplex_pair,
                             "distance": distance.hex(),
                         }
@@ -221,17 +219,18 @@ def _indexed_graph_counts(
 class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
     """Map labeled NetworkX graphs to sparse simplex-pair counts.
 
-    A simplex is a clique. Every vertex anchors every simplex containing it.
-    For each eligible unordered vertex pair, the vectorizer pairs all cliques
-    associated with each vertex; those cliques need not share a vertex. Each
-    clique type marks its anchor. Features are deterministically hashed into
-    unsigned coordinates; collisions accumulate occurrence counts.
+    A simplex is a clique assigned exactly once to its canonical representative:
+    its lowest vertex under the stable node ordering. For each eligible
+    unordered pair of representatives, the vectorizer pairs all cliques
+    assigned to each representative; those cliques need not share a vertex.
+    Each clique type marks its representative. Features are deterministically
+    hashed into unsigned coordinates; collisions accumulate occurrence counts.
 
     ``distance_jitter="auto"`` applies no jitter because shortest-path
     distances are discrete. A numeric value is added before distance filtering.
     """
 
-    FEATURE_ENCODING_VERSION = 4
+    FEATURE_ENCODING_VERSION = 5
 
     def __init__(
         self,

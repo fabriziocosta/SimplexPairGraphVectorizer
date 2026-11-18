@@ -1,4 +1,4 @@
-"""Utilities for interactively inspecting anchor-paired simplex features."""
+"""Utilities for interactively inspecting representative-paired simplex features."""
 
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ from enzyme_workflow.common import active_manifest
 
 @dataclass(frozen=True)
 class SimplexPair:
-    """Two cliques associated with anchors at the selected distance."""
+    """Two cliques paired by the distance between their representatives."""
 
-    left_anchor: Any
-    right_anchor: Any
+    left_representative: Any
+    right_representative: Any
     left: tuple[Any, ...]
     right: tuple[Any, ...]
     distance: int
@@ -95,23 +95,26 @@ def load_protein_geometry(
     return graph, coordinates
 
 
-def cliques_by_anchor(
+def cliques_by_representative(
     graph: nx.Graph, max_simplex_size: int
 ) -> dict[Any, list[tuple[Any, ...]]]:
-    """Enumerate simplices and associate each with every vertex it contains."""
+    """Assign each simplex once to its lowest-key vertex."""
     if max_simplex_size < 1:
         raise ValueError("max_simplex_size must be at least one vertex")
     from simplex_pair_vectorizer.vectorizer import _node_order
 
     node_keys, _ = _node_order(graph, None)
-    by_anchor: dict[Any, list[tuple[Any, ...]]] = {node: [] for node in graph.nodes}
+    by_representative: dict[Any, list[tuple[Any, ...]]] = {node: [] for node in graph.nodes}
     for clique in nx.enumerate_all_cliques(graph):
         if len(clique) > max_simplex_size:
             break
         simplex = tuple(sorted(clique, key=node_keys.__getitem__))
-        for anchor in simplex:
-            by_anchor[anchor].append(simplex)
-    return {anchor: simplices for anchor, simplices in by_anchor.items() if simplices}
+        by_representative[simplex[0]].append(simplex)
+    return {
+        representative: simplices
+        for representative, simplices in by_representative.items()
+        if simplices
+    }
 
 
 def sample_simplex_pair(
@@ -123,40 +126,51 @@ def sample_simplex_pair(
     max_distance: int,
     rng: random.Random,
 ) -> SimplexPair | None:
-    """Sample an anchor pair and incident cliques inside the selected ranges."""
+    """Sample a representative pair and assigned cliques inside the ranges."""
     if min_distance < 0 or max_distance < min_distance:
         raise ValueError("distance range must satisfy 0 <= min_distance <= max_distance")
     if min_simplex_size < 1 or max_simplex_size < min_simplex_size:
         raise ValueError("simplex size range must satisfy 1 <= min_size <= max_size")
-    by_anchor = cliques_by_anchor(graph, max_simplex_size)
-    by_anchor = {
-        anchor: [simplex for simplex in simplices if min_simplex_size <= len(simplex) <= max_simplex_size]
-        for anchor, simplices in by_anchor.items()
+    by_representative = cliques_by_representative(graph, max_simplex_size)
+    by_representative = {
+        representative: [
+            simplex
+            for simplex in simplices
+            if min_simplex_size <= len(simplex) <= max_simplex_size
+        ]
+        for representative, simplices in by_representative.items()
     }
-    by_anchor = {anchor: simplices for anchor, simplices in by_anchor.items() if simplices}
-    anchors = list(by_anchor)
-    if not anchors:
+    by_representative = {
+        representative: simplices
+        for representative, simplices in by_representative.items()
+        if simplices
+    }
+    representatives = list(by_representative)
+    if not representatives:
         return None
-    anchor_order = {node: index for index, node in enumerate(graph.nodes)}
-    anchor_pairs: list[tuple[Any, Any]] = []
-    for left_anchor in anchors:
-        lengths = nx.single_source_shortest_path_length(graph, left_anchor, cutoff=max_distance)
-        for right_anchor, path_length in lengths.items():
+    representative_order = {node: index for index, node in enumerate(graph.nodes)}
+    representative_pairs: list[tuple[Any, Any]] = []
+    for left_representative in representatives:
+        lengths = nx.single_source_shortest_path_length(
+            graph, left_representative, cutoff=max_distance
+        )
+        for right_representative, path_length in lengths.items():
             if (
                 min_distance <= path_length <= max_distance
-                and right_anchor in by_anchor
-                and anchor_order[right_anchor] >= anchor_order[left_anchor]
+                and right_representative in by_representative
+                and representative_order[right_representative]
+                >= representative_order[left_representative]
             ):
-                anchor_pairs.append((left_anchor, right_anchor))
-    if not anchor_pairs:
+                representative_pairs.append((left_representative, right_representative))
+    if not representative_pairs:
         return None
-    left_anchor, right_anchor = rng.choice(anchor_pairs)
+    left_representative, right_representative = rng.choice(representative_pairs)
     return SimplexPair(
-        left_anchor=left_anchor,
-        right_anchor=right_anchor,
-        left=rng.choice(by_anchor[left_anchor]),
-        right=rng.choice(by_anchor[right_anchor]),
-        distance=nx.shortest_path_length(graph, left_anchor, right_anchor),
+        left_representative=left_representative,
+        right_representative=right_representative,
+        left=rng.choice(by_representative[left_representative]),
+        right=rng.choice(by_representative[right_representative]),
+        distance=nx.shortest_path_length(graph, left_representative, right_representative),
     )
 
 
@@ -223,7 +237,7 @@ def draw_protein_feature(
         selected_nodes = set(feature.left) | set(feature.right)
         highlighted_edges_a = set(itertools.combinations(feature.left, 2))
         highlighted_edges_b = set(itertools.combinations(feature.right, 2))
-        representatives = (feature.left_anchor, feature.right_anchor)
+        representatives = (feature.left_representative, feature.right_representative)
 
     selected_edge_keys = {
         _edge_key(left, right)
@@ -306,7 +320,7 @@ def draw_protein_feature(
         for representative, outline_color, marker_name, symbol in zip(
             representatives,
             ("#FFB000", "#00D5FF"),
-            ("Anchor A", "Anchor B"),
+            ("Representative A", "Representative B"),
             ("circle", "circle"),
         ):
             xyz = coordinates[representative]
@@ -353,15 +367,15 @@ def draw_protein_feature(
 def display_feature_explorer(
     project_root: str | Path,
     *,
-    max_anchor_distance: int = 6,
+    max_representative_distance: int = 6,
     max_simplex_size: int = 4,
 ) -> None:
-    """Display the widget-driven protein and anchor-paired simplex explorer."""
+    """Display the widget-driven protein and representative-paired simplex explorer."""
     import ipywidgets as widgets
     from IPython.display import Markdown, clear_output, display
 
-    if not isinstance(max_anchor_distance, int) or max_anchor_distance < 0:
-        raise ValueError("max_anchor_distance must be a nonnegative integer")
+    if not isinstance(max_representative_distance, int) or max_representative_distance < 0:
+        raise ValueError("max_representative_distance must be a nonnegative integer")
     if not isinstance(max_simplex_size, int) or max_simplex_size < 1:
         raise ValueError("max_simplex_size must be at least one vertex")
 
@@ -377,11 +391,11 @@ def display_feature_explorer(
     protein_button = widgets.Button(description="Random protein", button_style="primary")
     feature_button = widgets.Button(description="Random feature")
     distance_slider = widgets.IntRangeSlider(
-        value=(0, max_anchor_distance),
+        value=(0, max_representative_distance),
         min=0,
-        max=max_anchor_distance,
+        max=max_representative_distance,
         step=1,
-        description="Anchor distance range (hops)",
+        description="Representative distance range (hops)",
         continuous_update=False,
         style={"description_width": "initial"},
         layout=widgets.Layout(width="48%"),
@@ -406,7 +420,8 @@ def display_feature_explorer(
             f"{row.get('protein_name', 'Protein')}<br>"
             f"Feature: {len(feature.left)}-vertex simplex [{left_label}] ↔ "
             f"{len(feature.right)}-vertex simplex [{right_label}] · "
-            f"anchors {feature.left_anchor} ↔ {feature.right_anchor} · distance {feature.distance} hops"
+            f"representatives {feature.left_representative} ↔ {feature.right_representative} · "
+            f"distance {feature.distance} hops"
         )
 
     def render(message: str | None = None) -> None:
@@ -439,7 +454,7 @@ def display_feature_explorer(
         )
         if state["feature"] is None:
             render(
-                f"No pair with anchor distance **{distance_slider.value[0]}–{distance_slider.value[1]}** "
+                f"No pair with representative distance **{distance_slider.value[0]}–{distance_slider.value[1]}** "
                 f"and simplex sizes **{size_slider.value[0]}–{size_slider.value[1]}** for "
                 f"{state['row']['sample_id']}. Change a slider or pick another protein."
             )

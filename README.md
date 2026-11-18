@@ -1,8 +1,8 @@
 # Simplex Pair Vectorizer
 
 This package converts labeled, undirected NetworkX graphs into sparse feature
-vectors built from anchored pairs of cliques (simplices). It reconstructs the
-SimplexPairGraphVectorizer interface used by the recovered protein graph
+vectors built from representative-paired cliques (simplices). It reconstructs
+the SimplexPairGraphVectorizer interface used by the recovered protein graph
 notebooks while keeping the implementation domain-neutral.
 
 ## Install
@@ -41,7 +41,7 @@ The `notebooks/` workflow has four stages:
 4. `04_visualize_ec_proteins_2d.ipynb` vectorizes the same cached graphs and
    visualizes them with the sibling `IteratedMinimumSpanningTreeEmbedder`.
 5. `05_explore_protein_simplex_pair.ipynb` opens a rotatable 3D protein graph
-   and interactively highlights a randomly sampled anchored simplex-pair feature.
+   and interactively highlights a randomly sampled representative-pair feature.
 
 Notebook 03 defaults to XGBoost's parallel histogram classifier. It consumes
 the vectorizer's sparse CSR matrix directly; `N_JOBS = -1` uses all available
@@ -106,26 +106,27 @@ workflow code lives in `notebooks/src/enzyme_workflow/`.
 
 The default output has 2**14 hashed coordinates. Hash collisions add counts to
 the same unsigned coordinate. The default simplex dimension of 3 includes
-cliques of up to four vertices. Every graph vertex anchors all cliques that
-contain it. Each unordered anchor-vertex pair in range contributes the
-Cartesian product of the associated cliques; the cliques need not share a
-vertex. At distance zero, the same anchor supplies both cliques and unordered
-clique pairs are used. Self-pairs are included by default.
+cliques of up to four vertices. Each clique is assigned once to its canonical
+representative: its lowest vertex under the stable node ordering. Every
+unordered pair of representative vertices in range contributes the Cartesian
+product of the cliques assigned to those vertices; the cliques need not share a
+vertex. At distance zero, the same representative supplies both cliques and
+unordered clique pairs are used. Self-pairs are included by default.
 
 ## Parameters
 
-For the mathematical definition of anchored simplex-pair features and graph-level
+For the mathematical definition of representative-pair features and graph-level
 count vectors, see [the whitepaper](docs/whitepaper.md).
 
 The vectorizer constructor defaults to dimension 3, pair distance 0–4 inclusive,
-representative-vertex distance, vertex-anchor pairing, 14-bit hashing, occurrence counts,
+representative-vertex distance, representative pairing, 14-bit hashing,
+occurrence counts,
 and self-pairs enabled. The enzyme notebooks currently set `NBITS = 11` for
 both classification and visualization. Node and edge labels are read from
 attributes named label; change node_label_key or edge_label_key to use other
 attributes.
 
-Clique vertices are ordered using a stable node key to establish a deterministic
-ordering convention; every vertex still anchors all cliques containing it. By
+The lowest stable node key selects each clique's unique representative. By
 default, the node itself is the key. Supply node_key= for custom node objects
 or to control ordering. Keys must be unique within each graph and stable across
 runs. distance_jitter="auto" means no jitter for the discrete
