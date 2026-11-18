@@ -34,8 +34,6 @@ env/
 *.swo
 
 # Generated datasets, caches, and experiment outputs
-data/raw/
-data/processed/
-data/cache/
+/data/
 results/
 *.joblib

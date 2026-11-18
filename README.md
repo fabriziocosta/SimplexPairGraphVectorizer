@@ -26,6 +26,40 @@ vectorizer = SimplexPairGraphVectorizer(n_jobs=1)
 features = vectorizer.fit_transform([graph])  # scipy CSR matrix
 ```
 
+## Enzyme classification notebooks
+
+The `notebooks/` workflow has three stages:
+
+1. `01_select_ec_proteins.ipynb` lists PDB-linked EC classes at a chosen level
+   and selects up to a configured number of UniProt proteins per class.
+2. `02_build_protein_graph_dataset.ipynb` downloads RCSB mmCIF files and saves
+   chain-level protein contact graphs plus resumable build status.
+3. `03_train_test_ec_classifier.ipynb` loads the graph cache and trains a
+   grouped train/test classifier using the simplex-pair features.
+
+Install the experiment dependencies and sibling protein graphicalizer with:
+
+```bash
+python -m pip install -e '.[protein]'
+python -m pip install -e '../abstractgraph-ecosystem/repos/abstractgraph-graphicalizer'
+```
+
+The default EC source is UniProtKB (human proteins with PDB cross-references);
+PDBe maps each selected accession and PDB entry to a chain, and the graphicalizer
+downloads the corresponding structure from RCSB. The manifest contains one
+chain per UniProt accession with exactly one EC prefix at the selected level.
+This keeps labels unambiguous and provides a protein grouping key for the split.
+Edit the first notebook's settings to change organism, EC level, selected ECs,
+or number of proteins per EC. UniProt responses, PDBe chain mappings, and a
+manifest with matching settings are reused on reruns. Set REBUILD_MANIFEST in
+notebook 01 to rerun selection from cached metadata; set both
+REFRESH_UNIPROT_CACHE and REBUILD_MANIFEST to refresh UniProt data and selection.
+Notebook 02 reuses cached mmCIF files and graph pickles when OVERWRITE=False,
+and shows cache counts before building.
+
+Graph caches and experiment outputs are written below `data/` and `results/`;
+the `.gitignore` excludes generated raw and processed data.
+
 The default output has 2**14 hashed coordinates. Hash collisions add counts to
 the same unsigned coordinate. The default simplex dimension of 3 includes
 cliques of up to four vertices. Rooted pairs share a graph vertex; each pair is
