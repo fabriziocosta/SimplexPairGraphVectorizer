@@ -117,24 +117,33 @@ def cliques_by_anchor(
 def sample_simplex_pair(
     graph: nx.Graph,
     *,
+    min_simplex_size: int,
     max_simplex_size: int,
-    distance: int,
+    min_distance: int,
+    max_distance: int,
     rng: random.Random,
 ) -> SimplexPair | None:
-    """Choose anchors exactly ``distance`` hops apart, then their incident cliques."""
-    if not isinstance(distance, int) or distance < 0:
-        raise ValueError("distance must be a nonnegative integer")
+    """Sample an anchor pair and incident cliques inside the selected ranges."""
+    if min_distance < 0 or max_distance < min_distance:
+        raise ValueError("distance range must satisfy 0 <= min_distance <= max_distance")
+    if min_simplex_size < 1 or max_simplex_size < min_simplex_size:
+        raise ValueError("simplex size range must satisfy 1 <= min_size <= max_size")
     by_anchor = cliques_by_anchor(graph, max_simplex_size)
+    by_anchor = {
+        anchor: [simplex for simplex in simplices if min_simplex_size <= len(simplex) <= max_simplex_size]
+        for anchor, simplices in by_anchor.items()
+    }
+    by_anchor = {anchor: simplices for anchor, simplices in by_anchor.items() if simplices}
     anchors = list(by_anchor)
     if not anchors:
         return None
     anchor_order = {node: index for index, node in enumerate(graph.nodes)}
     anchor_pairs: list[tuple[Any, Any]] = []
     for left_anchor in anchors:
-        lengths = nx.single_source_shortest_path_length(graph, left_anchor, cutoff=distance)
+        lengths = nx.single_source_shortest_path_length(graph, left_anchor, cutoff=max_distance)
         for right_anchor, path_length in lengths.items():
             if (
-                path_length == distance
+                min_distance <= path_length <= max_distance
                 and right_anchor in by_anchor
                 and anchor_order[right_anchor] >= anchor_order[left_anchor]
             ):
@@ -147,7 +156,7 @@ def sample_simplex_pair(
         right_anchor=right_anchor,
         left=rng.choice(by_anchor[left_anchor]),
         right=rng.choice(by_anchor[right_anchor]),
-        distance=distance,
+        distance=nx.shortest_path_length(graph, left_anchor, right_anchor),
     )
 
 
@@ -367,22 +376,22 @@ def display_feature_explorer(
     plot_output = widgets.Output(layout=widgets.Layout(width="100%"))
     protein_button = widgets.Button(description="Random protein", button_style="primary")
     feature_button = widgets.Button(description="Random feature")
-    distance_slider = widgets.IntSlider(
-        value=min(1, max_anchor_distance),
+    distance_slider = widgets.IntRangeSlider(
+        value=(0, max_anchor_distance),
         min=0,
         max=max_anchor_distance,
         step=1,
-        description="Anchor distance (hops)",
+        description="Anchor distance range (hops)",
         continuous_update=False,
         style={"description_width": "initial"},
         layout=widgets.Layout(width="48%"),
     )
-    size_slider = widgets.IntSlider(
-        value=max_simplex_size,
+    size_slider = widgets.IntRangeSlider(
+        value=(1, max_simplex_size),
         min=1,
         max=max_simplex_size,
         step=1,
-        description="Maximum simplex size (vertices)",
+        description="Simplex size range (vertices)",
         continuous_update=False,
         style={"description_width": "initial"},
         layout=widgets.Layout(width="48%"),
@@ -422,14 +431,17 @@ def display_feature_explorer(
             return
         state["feature"] = sample_simplex_pair(
             state["graph"],
-            max_simplex_size=size_slider.value,
-            distance=distance_slider.value,
+            min_simplex_size=size_slider.value[0],
+            max_simplex_size=size_slider.value[1],
+            min_distance=distance_slider.value[0],
+            max_distance=distance_slider.value[1],
             rng=rng,
         )
         if state["feature"] is None:
             render(
-                f"No pair at distance **{distance_slider.value}** with simplex sizes up to "
-                f"**{size_slider.value}** for {state['row']['sample_id']}. Change a slider or pick another protein."
+                f"No pair with anchor distance **{distance_slider.value[0]}–{distance_slider.value[1]}** "
+                f"and simplex sizes **{size_slider.value[0]}–{size_slider.value[1]}** for "
+                f"{state['row']['sample_id']}. Change a slider or pick another protein."
             )
         else:
             render()
