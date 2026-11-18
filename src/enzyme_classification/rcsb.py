@@ -238,7 +238,9 @@ def select_ec_protein_manifest(
     level. PDB structures for that accession are tried in seeded random order;
     the first mapped chain with the highest within-entry coverage is selected.
     If supplied, ``progress`` receives one result dictionary after each EC
-    class has been mapped and written to the resumable manifest.
+    class has been mapped and written to a temporary checkpoint. The complete
+    manifest replaces ``output_path`` atomically when every EC class is done,
+    so readers never see a partially selected dataset.
     """
     if proteins_per_ec < 1:
         raise ValueError("proteins_per_ec must be at least one")
@@ -264,6 +266,7 @@ def select_ec_protein_manifest(
     cache_path = Path(mapping_cache_path)
     mapping_cache = _load_mapping_cache(cache_path)
     output = Path(output_path)
+    working_output = output.with_suffix(output.suffix + ".building")
     manifest: list[dict[str, Any]] = []
     fieldnames = [
         "sample_id", "pdb_id", "entity_id", "label_asym_id", "auth_asym_id",
@@ -319,7 +322,7 @@ def select_ec_protein_manifest(
                 }
             )
         manifest.extend(class_rows)
-        _write_tsv(output, manifest, fieldnames)
+        _write_tsv(working_output, manifest, fieldnames)
         if progress is not None:
             progress(
                 {
@@ -333,4 +336,5 @@ def select_ec_protein_manifest(
         if verbose:
             print(f"EC {ec_number}: selected {len(class_rows)}/{proteins_per_ec} proteins")
 
+    working_output.replace(output)
     return manifest

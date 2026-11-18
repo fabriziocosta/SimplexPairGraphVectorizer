@@ -5,10 +5,29 @@ from __future__ import annotations
 import csv
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+
+_PROCESS_GRAPHICALIZER = None
+
+
+def _init_graph_process_worker(graphicalizer_options: dict[str, Any]) -> None:
+    """Create one graphicalizer per worker process (module-level for spawn)."""
+    global _PROCESS_GRAPHICALIZER
+    from abstractgraph_graphicalizer.protein import ProteinContactNetworkGraphicalizer
+
+    _PROCESS_GRAPHICALIZER = ProteinContactNetworkGraphicalizer(**graphicalizer_options)
+
+
+def _build_graph_process_worker(row: dict[str, str]) -> tuple[str, str, str]:
+    """Build one chain graph in a child process and return status metadata."""
+    if _PROCESS_GRAPHICALIZER is None:
+        raise RuntimeError("Graph process worker was not initialized")
+    _, result = _PROCESS_GRAPHICALIZER.transform_one(row)
+    return result.status, result.graph_path, ""
 
 
 def read_tsv(path: str | Path) -> list[dict[str, str]]:
@@ -51,6 +70,7 @@ def build_protein_graph_dataset(
     sleep_seconds: float = 0.0,
     n_jobs: int = 8,
     download_jobs: int = 8,
+    graph_executor: str = "process",
     sample_limit: int | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
     download_progress: Callable[[dict[str, Any]], None] | None = None,
@@ -59,8 +79,10 @@ def build_protein_graph_dataset(
     """Download structures and build PCNs concurrently, resuming graph caches.
 
     Structure downloads are parallelized by unique PDB identifier, then graph
-    construction is parallelized by protein chain. The download phase finishes
-    first so multiple workers never race to create the same mmCIF cache file.
+    construction is parallelized by protein chain. The graph phase uses spawned
+    processes by default for CPU parallelism; ``graph_executor="thread"`` keeps
+    the lower-overhead thread pool available for comparison. The download phase
+    finishes first so workers never race to create the same mmCIF cache file.
     """
     try:
         from abstractgraph_graphicalizer.protein import (
@@ -77,6 +99,8 @@ def build_protein_graph_dataset(
         manifest = manifest[:sample_limit]
     if not manifest:
         raise ValueError("Manifest is empty")
+    if graph_executor not in {"process", "thread"}:
+        raise ValueError("graph_executor must be 'process' or 'thread'")
 
     status_file = Path(status_path)
     log_file = Path(event_log_path)
@@ -204,10 +228,50 @@ def build_protein_graph_dataset(
             )
 
     if ready_rows:
-        with ThreadPoolExecutor(max_workers=min(workers, len(ready_rows))) as executor:
-            futures = [executor.submit(build_one, row) for row in ready_rows]
-            for future in as_completed(futures):
-                record_result(future.result())
+        max_workers = min(workers, len(ready_rows))
+        if graph_executor == "process":
+            graphicalizer_options = {
+                "mmcif_dir": raw_dir,
+                "graph_dir": graph_dir,
+                "min_distance": min_distance,
+                "max_distance": max_distance,
+                "overwrite": overwrite,
+                "return_graphs": False,
+                "download_timeout_seconds": download_timeout_seconds,
+                "download_max_retries": download_max_retries,
+                "download_retry_backoff_seconds": download_retry_backoff_seconds,
+                "sleep_seconds": sleep_seconds,
+            }
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_init_graph_process_worker,
+                initargs=(graphicalizer_options,),
+            ) as executor:
+                futures = {
+                    executor.submit(_build_graph_process_worker, row): row
+                    for row in ready_rows
+                }
+                for future in as_completed(futures):
+                    row = futures[future]
+                    graph_path = graphicalizer.graph_path_for(str(row["sample_id"]))
+                    try:
+                        status, result_path, error = future.result()
+                    except Exception as exc:
+                        status, result_path = "failed", str(graph_path)
+                        error = f"{type(exc).__name__}: {exc}"
+                    record_result(
+                        make_result(
+                            row,
+                            status=status,
+                            graph_path=Path(result_path or graph_path),
+                            error=error,
+                        )
+                    )
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(build_one, row) for row in ready_rows]
+                for future in as_completed(futures):
+                    record_result(future.result())
 
     # Write one current-run snapshot after every manifest row has a result.
     _write_tsv_atomic(status_file, results, fieldnames)

@@ -32,7 +32,8 @@ def build_graph_dataset(
     download_max_retries: int = 4,
     download_retry_backoff_seconds: float = 2.0,
     n_jobs: int = 8,
-    download_jobs: int = 8,
+    download_jobs: int = 128,
+    graph_executor: str = "process",
 ) -> GraphDatasetResult:
     """Build graphs for the active manifest, reporting cache and progress."""
     root = add_project_sources(project_root)
@@ -79,7 +80,10 @@ def build_graph_dataset(
     print(f"Existing graph caches: {cached_graphs:,}/{len(manifest):,}")
     print(f"Existing mmCIF files: {cached_mmcif:,}/{len(unique_pdb_ids):,} unique PDB entries")
     print(f"Graph cache: {graph_dir} (contact range {min_contact_distance:g}–{max_contact_distance:g} Å)")
-    print(f"Parallel workers: {n_jobs} graph workers; {download_jobs} structure-download workers")
+    print(
+        f"Parallel workers: {n_jobs} {graph_executor} graph workers; "
+        f"{download_jobs} structure-download workers"
+    )
 
     planned = len(manifest)
     status_rows = []
@@ -110,6 +114,7 @@ def build_graph_dataset(
             download_retry_backoff_seconds=download_retry_backoff_seconds,
             n_jobs=n_jobs,
             download_jobs=download_jobs,
+            graph_executor=graph_executor,
             sample_limit=sample_limit,
             progress=report_progress,
             download_progress=report_download,

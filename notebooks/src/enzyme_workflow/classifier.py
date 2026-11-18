@@ -175,7 +175,14 @@ def run_classifier(
     groups = dataset["uniprot_accession"].astype(str).to_numpy()
     counts = pd.Series(y).value_counts().sort_index()
     if len(counts) < 2:
-        raise ValueError("Classification needs at least two EC classes")
+        only_class = counts.index[0] if len(counts) else "none"
+        raise ValueError(
+            f"Classification needs at least two EC classes, but active manifest "
+            f"{manifest_path} (EC level {ec_level}) contains only class {only_class!r}. "
+            "Check EC_LEVEL and SELECTED_EC_NUMBERS in notebook 01, rerun its selection "
+            "cell, and wait for it to finish before running notebook 03. Run notebook 02 "
+            "if the selected dataset does not already have graph caches."
+        )
     class_group_counts = dataset.groupby("ec_number")["uniprot_accession"].nunique().sort_index()
     train_only_classes = class_group_counts[class_group_counts < 2].index.astype(str).tolist()
 
@@ -299,9 +306,20 @@ def run_classifier(
     else:
         model.fit(x_train, y_train)
     del x_train
-    x_test = [read_graph_pickle(graph_paths[index]) for index in test_idx]
-    print(f"Predicting {len(x_test):,} test proteins")
-    model_predictions = model.predict(x_test)
+    x_test_graphs = [read_graph_pickle(graph_paths[index]) for index in test_idx]
+    print(f"Vectorizing and predicting {len(x_test_graphs):,} test proteins")
+    # Transform once and use the fitted classifier directly for both labels and
+    # decision scores. Calling Pipeline.predict followed by Pipeline.decision_function
+    # would vectorize these expensive graphs twice.
+    x_test = model[:-1].transform(x_test_graphs)
+    del x_test_graphs
+    classifier = model.named_steps["classifier"]
+    model_predictions = classifier.predict(x_test)
+    raw_scores = (
+        np.asarray(classifier.decision_function(x_test))
+        if hasattr(classifier, "decision_function")
+        else np.asarray(classifier.predict_proba(x_test))
+    )
     del x_test
     if base_estimator_kind == "xgboost":
         y_pred = np.asarray(xgb_class_labels, dtype=object)[model_predictions.astype(int)]
@@ -377,13 +395,9 @@ def run_classifier(
         value_format="{:.2f}",
     )
 
-    model_classes = list(model.named_steps["classifier"].classes_)
+    model_classes = list(classifier.classes_)
     if base_estimator_kind == "xgboost":
         model_classes = [xgb_class_labels[int(class_id)] for class_id in model_classes]
-    if hasattr(model, "decision_function"):
-        raw_scores = np.asarray(model.decision_function(x_test))
-    else:
-        raw_scores = np.asarray(model.predict_proba(x_test))
     if raw_scores.ndim == 1:
         positive_class = model_classes[-1]
         if positive_class != labels[-1]:
