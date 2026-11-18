@@ -146,3 +146,14 @@ def test_rejects_non_unique_node_keys():
 
     with pytest.raises(ValueError, match="unique"):
         vectorizer.fit([graph])
+
+
+def test_parallel_transform_matches_sequential_transform():
+    graphs = [labeled_path(), labeled_path(("C", "A", "B")), labeled_path()]
+    sequential = SimplexPairGraphVectorizer(max_simplex_dimension=2, n_jobs=1)
+    parallel = SimplexPairGraphVectorizer(max_simplex_dimension=2, n_jobs=2)
+
+    sequential_features = sequential.fit_transform(graphs)
+    parallel_features = parallel.fit_transform(graphs)
+
+    assert (sequential_features != parallel_features).nnz == 0

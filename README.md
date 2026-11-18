@@ -95,11 +95,12 @@ counted once for each possible shared root. Self-pairs are included by default.
 For the mathematical definition of rooted simplex-pair features and graph-level
 count vectors, see [the whitepaper](docs/whitepaper.md).
 
-The recovered classifier configuration is used as the default: dimension 3,
-pair distance 0–4 inclusive, representative distance, rooted pairing, 14-bit
-hashing, occurrence counts, and self-pairs enabled. Node and edge labels are
-read from attributes named label; change node_label_key or edge_label_key to
-use other attributes.
+The vectorizer constructor defaults to dimension 3, pair distance 0–4 inclusive,
+representative distance, rooted pairing, 14-bit hashing, occurrence counts,
+and self-pairs enabled. The enzyme notebooks currently set `NBITS = 11` for
+both classification and visualization. Node and edge labels are read from
+attributes named label; change node_label_key or edge_label_key to use other
+attributes.
 
 For each simplex, its representative is the vertex with the lowest stable node
 key. By default, the node itself is the key. Supply node_key= for custom node

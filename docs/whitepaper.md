@@ -80,7 +80,7 @@ If different symbolic features map to the same coordinate, their counts add. The
 
 In the enzyme workflow, each graph vertex represents a C$\alpha$ atom from a selected protein chain, and an edge represents a residue pair whose spatial separation lies in the chosen contact window. The graph's vertices are labeled by an amino-acid category, and its edges receive contact labels (or optional distance-bin labels). The simplex-pair features are then generated from this labeled contact graph.
 
-With the current workflow defaults, the contact window is 4–8 Å, the node alphabet is `aa20`, the maximum simplex dimension is $q=3$, the representative distance interval is $[L,U]=[0,4]$, self-pairs are included, and the fixed vector width is $2^{14}$. The contact window determines which graph edges exist; the 0–4 feature distance limit instead counts shortest paths through those edges.
+With the current notebook settings, the contact window is 4–8 Å, the node alphabet is `aa20`, the maximum simplex dimension is $q=3$, the representative distance interval is $[L,U]=[0,4]$, self-pairs are included, and the fixed vector width is $2^{11}$. The vectorizer constructor itself defaults to $2^{14}$ coordinates. The contact window determines which graph edges exist; the 0–4 feature distance limit instead counts shortest paths through those edges.
 
 ## Interpretation and scope
 

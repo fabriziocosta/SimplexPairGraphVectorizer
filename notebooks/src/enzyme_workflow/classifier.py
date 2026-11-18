@@ -31,6 +31,13 @@ from sklearn.preprocessing import Normalizer, label_binarize
 from enzyme_workflow.common import active_manifest, add_project_sources
 
 
+def _detach_fit_callbacks(model: Pipeline) -> None:
+    """Remove training-only callbacks before persisting the fitted pipeline."""
+    classifier = model.named_steps.get("classifier")
+    if classifier is not None and hasattr(classifier, "callbacks"):
+        classifier.callbacks = None
+
+
 def _xgboost_progress_callback(total_rounds: int):
     """Create a tqdm callback that advances once per XGBoost boosting round."""
     from tqdm.auto import tqdm
@@ -465,7 +472,7 @@ def run_classifier(
     roc_figure.savefig(run_dir / "roc_curve.png", dpi=180)
     pr_figure.savefig(run_dir / "precision_recall_curve.png", dpi=180)
     if base_estimator_kind == "xgboost":
-        model.named_steps["classifier"].callbacks = None
+        _detach_fit_callbacks(model)
         estimator_parameters = {
             "n_estimators": xgb_n_estimators,
             "max_depth": 4,
