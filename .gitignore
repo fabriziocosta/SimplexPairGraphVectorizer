@@ -1,0 +1,41 @@
+# Python bytecode and test/type-check caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+**/.ipynb_checkpoints/
+
+# Build and package artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+wheelhouse/
+
+# Virtual environments and local tooling
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+.tox/
+.nox/
+
+# Editors and operating systems
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Generated datasets, caches, and experiment outputs
+data/raw/
+data/processed/
+data/cache/
+results/
+*.joblib
