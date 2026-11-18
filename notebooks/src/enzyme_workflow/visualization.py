@@ -16,6 +16,7 @@ import pandas as pd
 from plotly.colors import sample_colorscale
 import plotly.graph_objects as go
 from scipy import sparse
+from tqdm.auto import tqdm
 
 from enzyme_workflow.common import active_manifest, add_project_sources
 
@@ -147,8 +148,11 @@ def visualize_proteins_2d(
         "n_components": 2,
         "n_msts": 3,
         "n_epochs": 200,
-        "metric": "cosine",
-        "mst_method": "prim",
+        # FAMST currently uses Euclidean neighbors; keep this setting aligned
+        # with its approximate path instead of silently falling back to exact
+        # cosine Prim construction.
+        "metric": "euclidean",
+        "mst_method": "famst",
         "gravity_strength": 0.0,
         "mean_shift_iterations": 0,
         "device": "auto",
@@ -179,9 +183,21 @@ def visualize_proteins_2d(
 
     if feature_cache.is_file() and not rebuild_features:
         X = joblib.load(feature_cache)
-        print(f"Loaded cached feature matrix: {X.shape[0]:,} proteins × {X.shape[1]:,} features")
+        print(
+            "Feature vectorization skipped: loaded cached matrix "
+            f"({X.shape[0]:,} proteins × {X.shape[1]:,} features)"
+        )
     else:
-        graphs = [read_graph_pickle(path) for path in dataset["graph_path"]]
+        print(f"Loading graphs for vectorization ({len(dataset):,} proteins)", flush=True)
+        graphs = [
+            read_graph_pickle(path)
+            for path in tqdm(
+                dataset["graph_path"],
+                total=len(dataset),
+                desc="Loading protein graphs",
+                unit="protein",
+            )
+        ]
         labeled_graphs = ProteinLabelGraphicalizer(alphabet=node_label_alphabet).fit_transform(graphs)
         vectorizer = SimplexPairGraphVectorizer(
             simplex_dimension=simplex_dimension,
@@ -191,7 +207,9 @@ def visualize_proteins_2d(
             dense=False,
             include_self=include_self,
             n_jobs=-1,
+            progress=True,
         )
+        print("Starting simplex-pair feature extraction", flush=True)
         X = vectorizer.fit_transform(labeled_graphs)
         temporary_feature_cache = feature_cache.with_suffix(".joblib.tmp")
         joblib.dump(X, temporary_feature_cache)
