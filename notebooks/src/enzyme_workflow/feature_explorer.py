@@ -96,17 +96,17 @@ def load_protein_geometry(
 
 
 def cliques_by_representative(
-    graph: nx.Graph, max_simplex_size: int
+    graph: nx.Graph, max_simplex_dimension: int
 ) -> dict[Any, list[tuple[Any, ...]]]:
     """Assign each simplex once to its lowest-key vertex."""
-    if max_simplex_size < 1:
-        raise ValueError("max_simplex_size must be at least one vertex")
+    if max_simplex_dimension < 0:
+        raise ValueError("max_simplex_dimension must be nonnegative")
     from simplex_pair_vectorizer.vectorizer import _node_order
 
     node_keys, _ = _node_order(graph, None)
     by_representative: dict[Any, list[tuple[Any, ...]]] = {node: [] for node in graph.nodes}
     for clique in nx.enumerate_all_cliques(graph):
-        if len(clique) > max_simplex_size:
+        if len(clique) > max_simplex_dimension + 1:
             break
         simplex = tuple(sorted(clique, key=node_keys.__getitem__))
         by_representative[simplex[0]].append(simplex)
@@ -120,8 +120,8 @@ def cliques_by_representative(
 def sample_simplex_pair(
     graph: nx.Graph,
     *,
-    min_simplex_size: int,
-    max_simplex_size: int,
+    min_simplex_dimension: int,
+    max_simplex_dimension: int,
     min_distance: int,
     max_distance: int,
     rng: random.Random,
@@ -131,14 +131,14 @@ def sample_simplex_pair(
 
     if min_distance < 0 or max_distance < min_distance:
         raise ValueError("distance range must satisfy 0 <= min_distance <= max_distance")
-    if min_simplex_size < 1 or max_simplex_size < min_simplex_size:
-        raise ValueError("simplex size range must satisfy 1 <= min_size <= max_size")
-    by_representative = cliques_by_representative(graph, max_simplex_size)
+    if min_simplex_dimension < 0 or max_simplex_dimension < min_simplex_dimension:
+        raise ValueError("simplex dimension range must satisfy 0 <= min <= max")
+    by_representative = cliques_by_representative(graph, max_simplex_dimension)
     by_representative = {
         representative: [
             simplex
             for simplex in simplices
-            if min_simplex_size <= len(simplex) <= max_simplex_size
+            if min_simplex_dimension <= len(simplex) - 1 <= max_simplex_dimension
         ]
         for representative, simplices in by_representative.items()
     }
@@ -368,7 +368,7 @@ def display_feature_explorer(
     project_root: str | Path,
     *,
     max_representative_distance: int = 6,
-    max_simplex_size: int = 4,
+    max_simplex_dimension: int = 3,
 ) -> None:
     """Display the widget-driven protein and representative-paired simplex explorer."""
     import ipywidgets as widgets
@@ -376,8 +376,8 @@ def display_feature_explorer(
 
     if not isinstance(max_representative_distance, int) or max_representative_distance < 0:
         raise ValueError("max_representative_distance must be a nonnegative integer")
-    if not isinstance(max_simplex_size, int) or max_simplex_size < 1:
-        raise ValueError("max_simplex_size must be at least one vertex")
+    if not isinstance(max_simplex_dimension, int) or max_simplex_dimension < 0:
+        raise ValueError("max_simplex_dimension must be nonnegative")
 
     proteins = load_available_proteins(project_root)
     rng = random.Random()
@@ -401,11 +401,11 @@ def display_feature_explorer(
         layout=widgets.Layout(width="48%"),
     )
     size_slider = widgets.IntRangeSlider(
-        value=(1, max_simplex_size),
-        min=1,
-        max=max_simplex_size,
+        value=(0, max_simplex_dimension),
+        min=0,
+        max=max_simplex_dimension,
         step=1,
-        description="Simplex size range (vertices)",
+        description="Simplex dimension range",
         continuous_update=False,
         style={"description_width": "initial"},
         layout=widgets.Layout(width="48%"),
@@ -446,8 +446,8 @@ def display_feature_explorer(
             return
         state["feature"] = sample_simplex_pair(
             state["graph"],
-            min_simplex_size=size_slider.value[0],
-            max_simplex_size=size_slider.value[1],
+            min_simplex_dimension=size_slider.value[0],
+            max_simplex_dimension=size_slider.value[1],
             min_distance=distance_slider.value[0],
             max_distance=distance_slider.value[1],
             rng=rng,
@@ -455,7 +455,7 @@ def display_feature_explorer(
         if state["feature"] is None:
             render(
                 f"No pair with representative distance **{distance_slider.value[0]}–{distance_slider.value[1]}** "
-                f"and simplex sizes **{size_slider.value[0]}–{size_slider.value[1]}** for "
+                f"and simplex dimensions **{size_slider.value[0]}–{size_slider.value[1]}** for "
                 f"{state['row']['sample_id']}. Change a slider or pick another protein."
             )
         else:
