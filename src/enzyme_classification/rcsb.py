@@ -10,7 +10,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -229,6 +229,7 @@ def select_ec_protein_manifest(
     output_path: str | Path,
     timeout_seconds: int = 30,
     sleep_seconds: float = 0.05,
+    progress: Callable[[dict[str, Any]], None] | None = None,
     verbose: bool = True,
 ) -> list[dict[str, Any]]:
     """Choose at most N UniProt proteins per EC prefix and map to PDB chains.
@@ -236,6 +237,8 @@ def select_ec_protein_manifest(
     A UniProt accession must have exactly one distinct EC prefix at the chosen
     level. PDB structures for that accession are tried in seeded random order;
     the first mapped chain with the highest within-entry coverage is selected.
+    If supplied, ``progress`` receives one result dictionary after each EC
+    class has been mapped and written to the resumable manifest.
     """
     if proteins_per_ec < 1:
         raise ValueError("proteins_per_ec must be at least one")
@@ -268,7 +271,7 @@ def select_ec_protein_manifest(
         "protein_name", "organism", "mapping_identity", "mapping_coverage",
     ]
 
-    for ec_number in ec_numbers:
+    for ec_index, ec_number in enumerate(ec_numbers, start=1):
         candidate_rows = list(candidates_by_ec.get(ec_number, []))
         rng.shuffle(candidate_rows)
         class_rows: list[dict[str, Any]] = []
@@ -317,6 +320,16 @@ def select_ec_protein_manifest(
             )
         manifest.extend(class_rows)
         _write_tsv(output, manifest, fieldnames)
+        if progress is not None:
+            progress(
+                {
+                    "ec_number": ec_number,
+                    "selected": len(class_rows),
+                    "requested": proteins_per_ec,
+                    "completed_ec_classes": ec_index,
+                    "total_ec_classes": len(ec_numbers),
+                }
+            )
         if verbose:
             print(f"EC {ec_number}: selected {len(class_rows)}/{proteins_per_ec} proteins")
 

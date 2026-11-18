@@ -28,7 +28,7 @@ features = vectorizer.fit_transform([graph])  # scipy CSR matrix
 
 ## Enzyme classification notebooks
 
-The `notebooks/` workflow has three stages:
+The `notebooks/` workflow has four stages:
 
 1. `01_select_ec_proteins.ipynb` lists PDB-linked EC classes at a chosen level
    and selects up to a configured number of UniProt proteins per class.
@@ -36,13 +36,27 @@ The `notebooks/` workflow has three stages:
    chain-level protein contact graphs plus resumable build status.
 3. `03_train_test_ec_classifier.ipynb` loads the graph cache and trains a
    grouped train/test classifier using the simplex-pair features.
+4. `04_visualize_ec_proteins_2d.ipynb` vectorizes the same cached graphs and
+   visualizes them with the sibling `IteratedMinimumSpanningTreeEmbedder`.
 
 Install the experiment dependencies and sibling protein graphicalizer with:
 
 ```bash
 python -m pip install -e '.[protein]'
 python -m pip install -e '../abstractgraph-ecosystem/repos/abstractgraph-graphicalizer'
+python -m pip install -e '../IteratedMinimumSpanningTree[notebook]'
 ```
+
+Notebook 04 uses IMSTE's transductive `fit_transform` interface on the sparse
+simplex-pair feature matrix, then renders an interactive Plotly scatter with EC
+class toggles and protein metadata on hover. The feature matrix and coordinates
+are cached under `data/processed/`; set `REBUILD_FEATURES` or
+`REBUILD_EMBEDDING` in the notebook to recompute either stage.
+
+Notebook 01 publishes its active manifest so notebooks 02–04 follow the latest
+selected EC level automatically. Notebook 02 keeps graph caches in a folder
+keyed by the contact-distance range, so changing those settings uses a fresh
+cache while reruns with the same settings reuse completed graphs.
 
 The default EC source is UniProtKB (human proteins with PDB cross-references);
 PDBe maps each selected accession and PDB entry to a chain, and the graphicalizer
@@ -59,6 +73,9 @@ and shows cache counts before building.
 
 Graph caches and experiment outputs are written below `data/` and `results/`;
 the `.gitignore` excludes generated raw and processed data.
+
+The notebooks keep configuration and displays in the `.ipynb` files; reusable
+workflow code lives in `notebooks/src/enzyme_workflow/`.
 
 The default output has 2**14 hashed coordinates. Hash collisions add counts to
 the same unsigned coordinate. The default simplex dimension of 3 includes
