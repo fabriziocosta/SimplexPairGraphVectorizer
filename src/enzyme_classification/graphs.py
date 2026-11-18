@@ -89,6 +89,9 @@ def build_protein_graph_dataset(
         "sample_id", "pdb_id", "label_asym_id", "auth_asym_id", "graph_path",
         "status", "error", "updated_at_utc",
     ]
+    # Mark the cache status as rebuilding. The append-only event log remains
+    # the durable per-protein checkpoint while the snapshot is regenerated.
+    _write_tsv_atomic(status_file, [], fieldnames)
     graphicalizer = ProteinContactNetworkGraphicalizer(
         mmcif_dir=raw_mmcif_dir,
         graph_dir=graph_dir,
@@ -114,7 +117,6 @@ def build_protein_graph_dataset(
 
     def record_result(result: dict[str, Any]) -> None:
         results.append(result)
-        _write_tsv_atomic(status_file, results, fieldnames)
         log_file.parent.mkdir(parents=True, exist_ok=True)
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(result, sort_keys=True) + "\n")
@@ -207,4 +209,6 @@ def build_protein_graph_dataset(
             for future in as_completed(futures):
                 record_result(future.result())
 
+    # Write one current-run snapshot after every manifest row has a result.
+    _write_tsv_atomic(status_file, results, fieldnames)
     return results

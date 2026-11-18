@@ -114,13 +114,3 @@ transform returns a CSR matrix unless dense=True. Set n_jobs=1 for sequential
 processing or use a joblib value such as -1 for parallel graph conversion.
 cache_graphs=True retains per-object results for repeated transforms; mutate
 graphs only when caching is disabled or refit afterward.
-
-## Recovery context
-
-The recovered notes confirmed rooted simplex pairing and representative
-distance mode, with settings varying by experiment. The classifier notebook
-used maximum simplex dimension 3 and maximum pair distance 4; this package uses
-those as defaults. The original implementation and Git history were not
-recovered, so this is a documented reconstruction rather than an exact source
-restore. The original recovery archive remains in
-EnzymeClassification-recovery/.

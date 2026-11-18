@@ -31,6 +31,85 @@ from sklearn.preprocessing import Normalizer, label_binarize
 from enzyme_workflow.common import active_manifest, add_project_sources
 
 
+def _xgboost_progress_callback(total_rounds: int):
+    """Create a tqdm callback that advances once per XGBoost boosting round."""
+    from tqdm.auto import tqdm
+    from xgboost.callback import TrainingCallback
+
+    class TqdmTrainingCallback(TrainingCallback):
+        def __init__(self):
+            self.progress_bar = None
+
+        def before_training(self, model):
+            self.progress_bar = tqdm(
+                total=total_rounds,
+                desc="Training XGBoost",
+                unit="round",
+            )
+            return model
+
+        def after_iteration(self, model, epoch, evals_log):
+            if self.progress_bar is not None:
+                self.progress_bar.update(1)
+            return False
+
+        def after_training(self, model):
+            self.close()
+            return model
+
+        def close(self):
+            if self.progress_bar is not None:
+                self.progress_bar.close()
+
+    return TqdmTrainingCallback()
+
+
+def _grouped_train_test_split(
+    y: np.ndarray,
+    groups: np.ndarray,
+    *,
+    test_size: float,
+    random_state: int,
+) -> tuple[np.ndarray, np.ndarray, str]:
+    """Choose a grouped split that always leaves every label in training."""
+    all_labels = set(y)
+    support = pd.DataFrame({"label": y, "group": groups}).groupby("label")["group"].nunique()
+
+    def choose(candidates):
+        valid = [
+            (train_idx, test_idx)
+            for train_idx, test_idx in candidates
+            if len(test_idx) > 0 and set(y[train_idx]) == all_labels
+        ]
+        if not valid:
+            return None
+        return min(
+            valid,
+            key=lambda pair: (
+                -len(set(y[pair[1]])),
+                abs(len(pair[1]) / len(y) - test_size),
+            ),
+        )
+
+    if support.min() >= 5:
+        splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=random_state)
+        selected = choose(splitter.split(np.zeros(len(y)), y, groups))
+        if selected is not None:
+            return (*selected, "StratifiedGroupKFold best class-covered fold")
+
+    warnings.warn(
+        "Using a grouped holdout because at least one class has fewer than five "
+        "distinct groups or no valid stratified fold. Every class is retained in "
+        "training; classes without test examples cannot be evaluated.",
+        stacklevel=2,
+    )
+    splitter = GroupShuffleSplit(n_splits=200, test_size=test_size, random_state=random_state)
+    selected = choose(splitter.split(np.zeros(len(y)), y, groups))
+    if selected is None:
+        raise ValueError("Could not create a grouped split with every EC class in training")
+    return (*selected, "best class-covered GroupShuffleSplit")
+
+
 @dataclass
 class ClassificationResult:
     dataset: pd.DataFrame
@@ -66,6 +145,7 @@ def run_classifier(
     nbits: int = 14,
     vectorizer_progress: bool = True,
     n_jobs: int | None = -1,
+    classifier_progress: bool = True,
 ) -> ClassificationResult:
     """Load graph caches, split by UniProt accession, fit, and save a run."""
     root = add_project_sources(project_root)
@@ -84,7 +164,6 @@ def run_classifier(
     if dataset.empty:
         raise RuntimeError("No completed graph files found for the active manifest")
 
-    graphs = [read_graph_pickle(path) for path in dataset["graph_path"]]
     y = dataset["ec_number"].astype(str).to_numpy()
     groups = dataset["uniprot_accession"].astype(str).to_numpy()
     counts = pd.Series(y).value_counts().sort_index()
@@ -93,34 +172,19 @@ def run_classifier(
     class_group_counts = dataset.groupby("ec_number")["uniprot_accession"].nunique().sort_index()
     train_only_classes = class_group_counts[class_group_counts < 2].index.astype(str).tolist()
 
-    if class_group_counts.min() >= 5:
-        splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=random_state)
-        train_idx, test_idx = next(splitter.split(np.zeros(len(y)), y, groups))
-        split_strategy = "StratifiedGroupKFold first fold"
-    else:
+    train_idx, test_idx, split_strategy = _grouped_train_test_split(
+        y,
+        groups,
+        test_size=test_size,
+        random_state=random_state,
+    )
+    test_absent_classes = sorted(set(y) - set(y[test_idx]))
+    if test_absent_classes:
         warnings.warn(
-            "At least one EC class has fewer than five distinct UniProt groups; "
-            "choosing a grouped holdout that retains every class in training. "
-            "Singleton classes stay in training and are absent from test.",
+            "Some EC classes are absent from test and have no test metrics: "
+            + ", ".join(test_absent_classes),
             stacklevel=2,
         )
-        splitter = GroupShuffleSplit(n_splits=100, test_size=test_size, random_state=random_state)
-        candidates = list(splitter.split(np.zeros(len(y)), y, groups))
-        all_labels = set(y)
-        valid = [
-            pair for pair in candidates
-            if len(pair[1]) > 0 and set(y[pair[0]]) == all_labels
-        ]
-        if not valid:
-            raise ValueError("Could not create a train split containing every EC class")
-        train_idx, test_idx = min(
-            valid,
-            key=lambda pair: (
-                -len(set(y[pair[1]])),
-                abs(len(pair[1]) / len(y) - test_size),
-            ),
-        )
-        split_strategy = "best class-covered GroupShuffleSplit"
 
     steps = [
         ("protein_labels", ProteinLabelGraphicalizer(alphabet=node_label_alphabet)),
@@ -171,11 +235,15 @@ def run_classifier(
         )
         class_frequencies = np.bincount(y_train_fit, minlength=len(xgb_class_labels))
         xgb_sample_weight = len(y_train_fit) / (len(xgb_class_labels) * class_frequencies[y_train_fit])
+        xgb_n_estimators = 300
+        xgb_callback = (
+            _xgboost_progress_callback(xgb_n_estimators) if classifier_progress else None
+        )
         steps.append(
             (
                 "classifier",
                 XGBClassifier(
-                    n_estimators=300,
+                    n_estimators=xgb_n_estimators,
                     max_depth=4,
                     learning_rate=0.05,
                     subsample=0.8,
@@ -185,6 +253,7 @@ def run_classifier(
                     n_jobs=n_jobs,
                     random_state=random_state,
                     verbosity=0,
+                    callbacks=[xgb_callback] if xgb_callback is not None else None,
                 ),
             )
         )
@@ -206,8 +275,8 @@ def run_classifier(
         raise ValueError(f"Unknown base_estimator_kind={base_estimator_kind!r}")
 
     model = Pipeline(steps)
-    x_train = [graphs[index] for index in train_idx]
-    x_test = [graphs[index] for index in test_idx]
+    graph_paths = dataset["graph_path"].tolist()
+    x_train = [read_graph_pickle(graph_paths[index]) for index in train_idx]
     y_train, y_test = y[train_idx], y[test_idx]
     print(f"Fitting classifier on {len(x_train):,} training proteins")
     fit_parameters = {}
@@ -215,9 +284,15 @@ def run_classifier(
         fit_parameters = {
             "classifier__sample_weight": xgb_sample_weight,
         }
-        model.fit(x_train, y_train_fit, **fit_parameters)
+        try:
+            model.fit(x_train, y_train_fit, **fit_parameters)
+        finally:
+            if xgb_callback is not None:
+                xgb_callback.close()
     else:
         model.fit(x_train, y_train)
+    del x_train
+    x_test = [read_graph_pickle(graph_paths[index]) for index in test_idx]
     print(f"Predicting {len(x_test):,} test proteins")
     model_predictions = model.predict(x_test)
     if base_estimator_kind == "xgboost":
@@ -368,7 +443,7 @@ def run_classifier(
     )
     pr_axis.grid(alpha=0.2)
 
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     run_dir = root / "results" / f"ec_level_{ec_level}_{run_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
     predictions = dataset.iloc[test_idx][
@@ -378,6 +453,10 @@ def run_classifier(
     predictions["y_pred"] = y_pred
     predictions["correct"] = predictions["y_true"] == predictions["y_pred"]
     predictions.to_csv(run_dir / "predictions.tsv", sep="\t", index=False)
+    split_assignments = dataset[["sample_id", "uniprot_accession", "ec_number"]].copy()
+    split_assignments["split"] = "train"
+    split_assignments.loc[test_idx, "split"] = "test"
+    split_assignments.to_csv(run_dir / "train_test_split.tsv", sep="\t", index=False)
     report.to_csv(run_dir / "classification_report.tsv", sep="\t")
     confusion.to_csv(run_dir / "confusion_matrix.tsv", sep="\t")
     confusion_fractions.to_csv(run_dir / "confusion_matrix_row_fractions.tsv", sep="\t")
@@ -385,6 +464,35 @@ def run_classifier(
     confusion_fraction_figure.savefig(run_dir / "confusion_matrix_row_fractions.png", dpi=180)
     roc_figure.savefig(run_dir / "roc_curve.png", dpi=180)
     pr_figure.savefig(run_dir / "precision_recall_curve.png", dpi=180)
+    if base_estimator_kind == "xgboost":
+        model.named_steps["classifier"].callbacks = None
+        estimator_parameters = {
+            "n_estimators": xgb_n_estimators,
+            "max_depth": 4,
+            "learning_rate": 0.05,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "reg_lambda": 1.0,
+            "tree_method": "hist",
+            "n_jobs": n_jobs,
+        }
+    elif base_estimator_kind == "random_forest":
+        estimator_parameters = {
+            "n_estimators": 500,
+            "max_features": "sqrt",
+            "min_samples_leaf": 2,
+            "class_weight": "balanced_subsample",
+            "n_jobs": n_jobs,
+        }
+    else:
+        estimator_parameters = {
+            "loss": "hinge",
+            "alpha": 1e-4,
+            "max_iter": 5000,
+            "tol": 1e-4,
+            "class_weight": "balanced",
+            "n_jobs": n_jobs,
+        }
     metadata = {
         "created_at_utc": run_id,
         "ec_level": ec_level,
@@ -400,8 +508,10 @@ def run_classifier(
         "nbits": nbits,
         "feature_encoding_version": SimplexPairGraphVectorizer.FEATURE_ENCODING_VERSION,
         "base_estimator_kind": base_estimator_kind,
+        "estimator_parameters": estimator_parameters,
         "train_samples": int(len(train_idx)),
         "test_samples": int(len(test_idx)),
+        "test_absent_classes": test_absent_classes,
         "train_test_group_overlap": sorted(set(groups[train_idx]) & set(groups[test_idx])),
         "accuracy": accuracy,
         "balanced_accuracy": balanced_accuracy,

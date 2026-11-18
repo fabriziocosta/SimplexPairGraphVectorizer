@@ -11,7 +11,7 @@ from typing import Any
 
 import networkx as nx
 import numpy as np
-from joblib import Parallel, delayed
+from joblib import Parallel, delayed, effective_n_jobs
 from scipy.sparse import csr_matrix
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
@@ -112,9 +112,14 @@ def _graph_counts(
         simplices.append(tuple(sorted(clique, key=node_keys.__getitem__)))
 
     by_root: dict[Any, list[int]] = {node: [] for node in graph.nodes}
+    by_root_representative: dict[Any, dict[Any, list[int]]] = {
+        node: {} for node in graph.nodes
+    }
     for simplex_index, simplex in enumerate(simplices):
+        representative = simplex[0]
         for node in simplex:
             by_root[node].append(simplex_index)
+            by_root_representative[node].setdefault(representative, []).append(simplex_index)
 
     jitter = 0.0 if distance_jitter in (None, "auto") else float(distance_jitter)
     max_hops = math.floor(max_distance - jitter)
@@ -140,30 +145,28 @@ def _graph_counts(
     # The common root is part of the feature. A pair is symmetric; each
     # simplex pair is visited once for each possible common root.
     for root in ordered_nodes:
-        simplex_indices = by_root[root]
-        for local_i, left_index in enumerate(simplex_indices):
-            for right_index in simplex_indices[local_i:]:
-                if left_index == right_index and not include_self:
-                    continue
-                left_simplex = simplices[left_index]
-                right_simplex = simplices[right_index]
-                left_rep = left_simplex[0]
-                right_rep = right_simplex[0]
-                path_length = distances[left_rep].get(right_rep)
-                if path_length is None:
+        representative_groups = by_root_representative[root]
+        for left_index in by_root[root]:
+            left_rep = simplices[left_index][0]
+            for right_rep, path_length in distances[left_rep].items():
+                right_indices = representative_groups.get(right_rep)
+                if not right_indices:
                     continue
                 distance = float(path_length) + jitter
                 if distance < min_distance or distance > max_distance:
                     continue
-                first, second = sorted((
-                    (simplex_hashes[left_index], root_positions[left_index][root]),
-                    (simplex_hashes[right_index], root_positions[right_index][root]),
-                ))
-                feature = (
-                    f"rooted_simplex_pair_v2:{first[0].hex()}:{first[1]}:"
-                    f"{second[0].hex()}:{second[1]}:{distance.hex()}"
-                )
-                counts[feature] += 1
+                for right_index in right_indices:
+                    if right_index < left_index or (right_index == left_index and not include_self):
+                        continue
+                    first, second = sorted((
+                        (simplex_hashes[left_index], root_positions[left_index][root]),
+                        (simplex_hashes[right_index], root_positions[right_index][root]),
+                    ))
+                    feature = (
+                        f"rooted_simplex_pair_v2:{first[0].hex()}:{first[1]}:"
+                        f"{second[0].hex()}:{second[1]}:{distance.hex()}"
+                    )
+                    counts[feature] += 1
     return counts
 
 
@@ -174,8 +177,8 @@ def _hash_index(feature: str, n_features: int) -> int:
 
 def _indexed_graph_counts(
     vectorizer: "SimplexPairGraphVectorizer", index: int, graph: nx.Graph
-) -> tuple[int, Counter[str]]:
-    """Return a graph's input index with its counts for unordered workers."""
+) -> tuple[int, Counter[int]]:
+    """Return a graph's input index with compact hashed counts."""
     return index, vectorizer._counts(graph)
 
 
@@ -255,8 +258,8 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
         if not isinstance(self.progress, (bool, np.bool_)):
             raise ValueError("progress must be a boolean")
 
-    def _counts(self, graph: nx.Graph) -> Counter[str]:
-        return _graph_counts(
+    def _counts(self, graph: nx.Graph) -> Counter[int]:
+        feature_counts = _graph_counts(
             graph,
             max_simplex_dimension=self.max_simplex_dimension,
             min_distance=float(self.min_distance),
@@ -267,6 +270,10 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
             edge_label_key=self.edge_label_key,
             node_key=self.node_key,
         )
+        hashed_counts: Counter[int] = Counter()
+        for feature, count in feature_counts.items():
+            hashed_counts[_hash_index(feature, self.n_features_out_)] += count
+        return hashed_counts
 
     def fit(self, X: Iterable[nx.Graph], y: Any = None) -> "SimplexPairGraphVectorizer":
         """Validate the input; hashing requires no learned vocabulary."""
@@ -277,7 +284,7 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
             _node_order(graph, self.node_key)
         self.n_features_out_ = 1 << self.nbits
         self.n_features_in_ = 1
-        self._graph_cache_: dict[int, tuple[nx.Graph, Counter[str]]] = {}
+        self._graph_cache_: dict[int, tuple[nx.Graph, Counter[int]]] = {}
         if self.cache_graphs:
             for graph in graphs:
                 self._graph_cache_[id(graph)] = (graph, self._counts(graph))
@@ -288,7 +295,7 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
         check_is_fitted(self, "n_features_out_")
         graphs = list(X)
 
-        def counts_for(graph: nx.Graph) -> Counter[str]:
+        def counts_for(graph: nx.Graph) -> Counter[int]:
             _validate_graph(graph)
             if self.cache_graphs:
                 cached = self._graph_cache_.get(id(graph))
@@ -314,6 +321,8 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
                 n_jobs=self.n_jobs,
                 prefer="processes",
                 return_as="generator_unordered",
+                pre_dispatch=effective_n_jobs(self.n_jobs),
+                batch_size=1,
             )(
                 delayed(_indexed_graph_counts)(self, index, graph)
                 for index, graph in enumerate(graphs)
@@ -335,12 +344,9 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
         indices: list[int] = []
         indptr = [0]
         for row in rows:
-            hashed: Counter[int] = Counter()
-            for feature, count in row.items():
-                hashed[_hash_index(feature, self.n_features_out_)] += count
-            for index in sorted(hashed):
+            for index in sorted(row):
                 indices.append(index)
-                data.append(hashed[index])
+                data.append(row[index])
             indptr.append(len(indices))
 
         matrix = csr_matrix(
