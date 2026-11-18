@@ -68,19 +68,51 @@ def _node_order(
 def _simplex_hash(
     graph: nx.Graph,
     simplex: Sequence[Any],
+    root: Any,
     node_label_key: str,
     edge_label_key: str,
 ) -> bytes:
-    """Hash a simplex's labels and edges once, independent of its root."""
-    ordered = list(simplex)
-    node_labels = [_canonical_json(graph.nodes[node].get(node_label_key)) for node in ordered]
-    edge_labels = []
-    for i, left in enumerate(ordered):
-        for j in range(i + 1, len(ordered)):
-            right = ordered[j]
+    """Hash a root-marked simplex from unordered node and edge signatures."""
+    if root not in simplex:
+        raise ValueError("root must be a vertex of the simplex")
+
+    node_hashes = {}
+    for node in simplex:
+        node_payload = {
+            "kind": "simplex_node_v1",
+            "role": "root" if node == root else "vertex",
+            "label": graph.nodes[node].get(node_label_key),
+        }
+        node_hashes[node] = hashlib.blake2b(
+            _canonical_json(node_payload).encode("utf-8"),
+            digest_size=16,
+            person=b"simplexnode",
+        ).digest()
+
+    edge_hashes = []
+    for i, left in enumerate(simplex):
+        for right in simplex[i + 1 :]:
             edge_data = graph.get_edge_data(left, right, default={})
-            edge_labels.append([i, j, _canonical_json(edge_data.get(edge_label_key))])
-    signature = _canonical_json({"nodes": node_labels, "edges": edge_labels})
+            endpoint_hashes = sorted((node_hashes[left].hex(), node_hashes[right].hex()))
+            edge_payload = {
+                "kind": "simplex_edge_v1",
+                "label": edge_data.get(edge_label_key),
+                "endpoints": endpoint_hashes,
+            }
+            edge_hashes.append(
+                hashlib.blake2b(
+                    _canonical_json(edge_payload).encode("utf-8"),
+                    digest_size=16,
+                    person=b"simplexedge",
+                ).digest()
+            )
+
+    signature = _canonical_json(
+        {
+            "nodes": sorted(value.hex() for value in node_hashes.values()),
+            "edges": sorted(value.hex() for value in edge_hashes),
+        }
+    )
     return hashlib.blake2b(
         signature.encode("utf-8"), digest_size=16, person=b"simplexatom"
     ).digest()
@@ -126,12 +158,17 @@ def _graph_counts(
     if max_hops < 0:
         return Counter()
 
-    simplex_hashes = [
-        _simplex_hash(graph, simplex, node_label_key, edge_label_key)
-        for simplex in simplices
-    ]
-    root_positions = [
-        {node: position for position, node in enumerate(simplex)}
+    rooted_simplex_hashes = [
+        {
+            root: _simplex_hash(
+                graph,
+                simplex,
+                root,
+                node_label_key,
+                edge_label_key,
+            )
+            for root in simplex
+        }
         for simplex in simplices
     ]
 
@@ -158,13 +195,18 @@ def _graph_counts(
                 for right_index in right_indices:
                     if right_index < left_index or (right_index == left_index and not include_self):
                         continue
-                    first, second = sorted((
-                        (simplex_hashes[left_index], root_positions[left_index][root]),
-                        (simplex_hashes[right_index], root_positions[right_index][root]),
-                    ))
-                    feature = (
-                        f"rooted_simplex_pair_v2:{first[0].hex()}:{first[1]}:"
-                        f"{second[0].hex()}:{second[1]}:{distance.hex()}"
+                    simplex_pair = sorted(
+                        (
+                            rooted_simplex_hashes[left_index][root].hex(),
+                            rooted_simplex_hashes[right_index][root].hex(),
+                        )
+                    )
+                    feature = _canonical_json(
+                        {
+                            "kind": "rooted_simplex_pair_v3",
+                            "simplices": simplex_pair,
+                            "distance": distance.hex(),
+                        }
                     )
                     counts[feature] += 1
     return counts
@@ -196,7 +238,7 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
     distances are discrete. A numeric value is added before distance filtering.
     """
 
-    FEATURE_ENCODING_VERSION = 2
+    FEATURE_ENCODING_VERSION = 3
 
     def __init__(
         self,
