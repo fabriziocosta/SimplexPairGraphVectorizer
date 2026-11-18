@@ -126,9 +126,8 @@ def visualize_proteins_2d(
     project_root: str | Path,
     *,
     node_label_alphabet: str = "aa20",
-    max_simplex_dimension: int = 3,
-    min_pair_distance: int = 0,
-    max_pair_distance: int = 4,
+    simplex_dimension: int | tuple[int, int] = 3,
+    pair_distance: int | float | tuple[int | float, int | float] = 4,
     nbits: int = 14,
     include_self: bool = True,
     imste_parameters: dict[str, Any] | None = None,
@@ -162,9 +161,8 @@ def visualize_proteins_2d(
     vectorizer_settings = {
         "feature_encoding_version": SimplexPairGraphVectorizer.FEATURE_ENCODING_VERSION,
         "node_label_alphabet": node_label_alphabet,
-        "max_simplex_dimension": max_simplex_dimension,
-        "min_pair_distance": min_pair_distance,
-        "max_pair_distance": max_pair_distance,
+        "simplex_dimension": simplex_dimension,
+        "pair_distance": pair_distance,
         "nbits": nbits,
         "include_self": include_self,
     }
@@ -184,9 +182,8 @@ def visualize_proteins_2d(
         graphs = [read_graph_pickle(path) for path in dataset["graph_path"]]
         labeled_graphs = ProteinLabelGraphicalizer(alphabet=node_label_alphabet).fit_transform(graphs)
         vectorizer = SimplexPairGraphVectorizer(
-            max_simplex_dimension=max_simplex_dimension,
-            min_distance=min_pair_distance,
-            max_distance=max_pair_distance,
+            simplex_dimension=simplex_dimension,
+            pair_distance=pair_distance,
             nbits=nbits,
             dense=False,
             include_self=include_self,

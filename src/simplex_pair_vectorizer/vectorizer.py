@@ -7,6 +7,7 @@ import json
 import math
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
+from numbers import Integral, Real
 from typing import Any
 
 import networkx as nx
@@ -65,6 +66,45 @@ def _node_order(
     return keys, sorted(graph.nodes, key=keys.__getitem__)
 
 
+def _simplex_dimension_bounds(value: Any) -> tuple[int, int]:
+    """Expand a dimension limit into an inclusive ``(minimum, maximum)``."""
+    if isinstance(value, Integral) and not isinstance(value, bool):
+        minimum, maximum = 0, int(value)
+    elif (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and all(isinstance(item, Integral) and not isinstance(item, bool) for item in value)
+    ):
+        minimum, maximum = map(int, value)
+    else:
+        raise ValueError("simplex_dimension must be an integer or a two-integer tuple")
+    if minimum < 0 or maximum < minimum:
+        raise ValueError("simplex_dimension must satisfy 0 <= minimum <= maximum")
+    return minimum, maximum
+
+
+def _pair_distance_bounds(value: Any) -> tuple[float, float]:
+    """Expand a distance limit into an inclusive ``(minimum, maximum)``."""
+    if isinstance(value, Real) and not isinstance(value, bool):
+        minimum, maximum = 0.0, float(value)
+    elif (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and all(isinstance(item, Real) and not isinstance(item, bool) for item in value)
+    ):
+        minimum, maximum = map(float, value)
+    else:
+        raise ValueError("pair_distance must be a number or a two-number tuple")
+    if (
+        not math.isfinite(minimum)
+        or not math.isfinite(maximum)
+        or minimum < 0
+        or maximum < minimum
+    ):
+        raise ValueError("pair_distance must satisfy 0 <= minimum <= maximum")
+    return minimum, maximum
+
+
 def _simplex_hash(
     graph: nx.Graph,
     simplex: Sequence[Any],
@@ -121,6 +161,7 @@ def _simplex_hash(
 def _graph_counts(
     graph: nx.Graph,
     *,
+    min_simplex_dimension: int,
     max_simplex_dimension: int,
     min_distance: float,
     max_distance: float,
@@ -135,12 +176,15 @@ def _graph_counts(
     if not ordered_nodes:
         return Counter()
 
+    min_size = min_simplex_dimension + 1
     max_size = max_simplex_dimension + 1
     simplices: list[tuple[Any, ...]] = []
     # NetworkX emits cliques in nondecreasing size, so stop at max dimension.
     for clique in nx.enumerate_all_cliques(graph):
         if len(clique) > max_size:
             break
+        if len(clique) < min_size:
+            continue
         simplices.append(tuple(sorted(clique, key=node_keys.__getitem__)))
 
     by_representative: dict[Any, list[int]] = {node: [] for node in graph.nodes}
@@ -226,6 +270,10 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
     Each clique type marks its representative. Features are deterministically
     hashed into unsigned coordinates; collisions accumulate occurrence counts.
 
+    Scalar ``simplex_dimension`` and ``pair_distance`` values mean inclusive
+    ranges from zero to that value. Two-value tuples set inclusive minimum and
+    maximum bounds.
+
     ``distance_jitter="auto"`` applies no jitter because shortest-path
     distances are discrete. A numeric value is added before distance filtering.
     """
@@ -234,9 +282,8 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
 
     def __init__(
         self,
-        max_simplex_dimension: int = 3,
-        min_distance: float = 0,
-        max_distance: float = 4,
+        simplex_dimension: int | tuple[int, int] = 3,
+        pair_distance: int | float | tuple[int | float, int | float] = 4,
         distance_mode: str = "representative",
         distance_jitter: str | float | None = "auto",
         pairing_mode: str = "representative",
@@ -249,10 +296,12 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
         node_label_key: str = "label",
         edge_label_key: str = "label",
         node_key: Callable[[Any], Any] | None = None,
+        max_simplex_dimension: int | None = None,
+        min_distance: float | None = None,
+        max_distance: float | None = None,
     ) -> None:
-        self.max_simplex_dimension = max_simplex_dimension
-        self.min_distance = min_distance
-        self.max_distance = max_distance
+        self.simplex_dimension = simplex_dimension
+        self.pair_distance = pair_distance
         self.distance_mode = distance_mode
         self.distance_jitter = distance_jitter
         self.pairing_mode = pairing_mode
@@ -265,19 +314,31 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
         self.node_label_key = node_label_key
         self.edge_label_key = edge_label_key
         self.node_key = node_key
+        # Legacy keyword aliases are retained for existing direct callers.
+        self.max_simplex_dimension = max_simplex_dimension
+        self.min_distance = min_distance
+        self.max_distance = max_distance
+
+    def _configured_ranges(self) -> tuple[tuple[int, int], tuple[float, float]]:
+        dimension_value = (
+            self.simplex_dimension
+            if self.max_simplex_dimension is None
+            else self.max_simplex_dimension
+        )
+        distance_minimum, distance_maximum = _pair_distance_bounds(self.pair_distance)
+        if self.min_distance is not None:
+            distance_minimum = float(self.min_distance)
+        if self.max_distance is not None:
+            distance_maximum = float(self.max_distance)
+        return (
+            _simplex_dimension_bounds(dimension_value),
+            _pair_distance_bounds((distance_minimum, distance_maximum)),
+        )
 
     def _validate_parameters(self) -> None:
-        if not isinstance(self.max_simplex_dimension, int) or self.max_simplex_dimension < 0:
-            raise ValueError("max_simplex_dimension must be a nonnegative integer")
+        self._configured_ranges()
         if not isinstance(self.nbits, int) or not 1 <= self.nbits <= 30:
             raise ValueError("nbits must be an integer between 1 and 30")
-        if (
-            not math.isfinite(float(self.min_distance))
-            or not math.isfinite(float(self.max_distance))
-            or self.min_distance < 0
-            or self.max_distance < self.min_distance
-        ):
-            raise ValueError("distance limits must satisfy 0 <= min_distance <= max_distance")
         if self.distance_mode != "representative":
             raise ValueError("Only distance_mode='representative' is currently supported")
         if self.pairing_mode != "representative":
@@ -293,11 +354,13 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
             raise ValueError("progress must be a boolean")
 
     def _counts(self, graph: nx.Graph) -> Counter[int]:
+        (min_dimension, max_dimension), (min_distance, max_distance) = self._configured_ranges()
         feature_counts = _graph_counts(
             graph,
-            max_simplex_dimension=self.max_simplex_dimension,
-            min_distance=float(self.min_distance),
-            max_distance=float(self.max_distance),
+            min_simplex_dimension=min_dimension,
+            max_simplex_dimension=max_dimension,
+            min_distance=min_distance,
+            max_distance=max_distance,
             distance_jitter=self.distance_jitter,
             include_self=self.include_self,
             node_label_key=self.node_label_key,

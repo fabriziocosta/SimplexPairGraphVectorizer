@@ -118,10 +118,13 @@ unordered clique pairs are used. Self-pairs are included by default.
 For the mathematical definition of representative-pair features and graph-level
 count vectors, see [the whitepaper](docs/whitepaper.md).
 
-The vectorizer constructor defaults to dimension 3, pair distance 0–4 inclusive,
+The vectorizer constructor defaults to `simplex_dimension=3` and
+`pair_distance=4`. A single number sets the inclusive maximum with a minimum of
+zero: `simplex_dimension=3` selects dimensions 0–3, and `pair_distance=4`
+selects distances 0–4. A two-value tuple sets inclusive `(minimum, maximum)`
+bounds, such as `(1, 3)` or `(1, 4)`. It also defaults to
 representative-vertex distance, representative pairing, 14-bit hashing,
-occurrence counts,
-and self-pairs enabled. The enzyme notebooks currently set `NBITS = 11` for
+occurrence counts, and self-pairs enabled. The enzyme notebooks currently set `NBITS = 11` for
 both classification and visualization. Node and edge labels are read from
 attributes named label; change node_label_key or edge_label_key to use other
 attributes.

@@ -6,13 +6,13 @@ The vectorizer maps a labeled graph to counts of pairs of labeled clique pattern
 
 ## Labeled graph and simplices
 
-Let $G=(V,E,\ell_V,\ell_E)$ be a finite, simple, undirected graph with vertex and edge labels. A simplex is a nonempty clique, with dimension $|\sigma|-1$. Given a maximum dimension $q$, the allowed simplices are
+Let $G=(V,E,\ell_V,\ell_E)$ be a finite, simple, undirected graph with vertex and edge labels. A simplex is a nonempty clique, with dimension $|\sigma|-1$. For an inclusive dimension interval $[q_{\min},q_{\max}]$, the allowed simplices are
 
-$$\mathcal{C}_{q}(G)=\{\sigma\subseteq V:1\leq |\sigma|\leq q+1,\ \forall u,v\in\sigma,\ u\ne v\Rightarrow\{u,v\}\in E\}.$$
+$$\mathcal{C}_{q_{\min},q_{\max}}(G)=\{\sigma\subseteq V:q_{\min}+1\leq |\sigma|\leq q_{\max}+1,\ \forall u,v\in\sigma,\ u\ne v\Rightarrow\{u,v\}\in E\}.$$
 
 Each simplex $\sigma$ has one canonical representative $\rho(\sigma)$: its lowest vertex under a fixed stable node ordering. Its associated simplex collection is
 
-$$\mathcal{C}_{q}(G;u)=\{\sigma\in\mathcal{C}_{q}(G):\rho(\sigma)=u\}.$$
+$$\mathcal{C}_{q_{\min},q_{\max}}(G;u)=\{\sigma\in\mathcal{C}_{q_{\min},q_{\max}}(G):\rho(\sigma)=u\}.$$
 
 Thus a clique belongs to exactly one representative's collection, even though its other vertices may be representatives of different cliques.
 
@@ -26,7 +26,7 @@ An unordered pair of representative vertices $\{u,v\}$ has unweighted shortest-p
 
 $$L\leq d_G(u,v)+\varepsilon\leq U,$$
 
-where $\varepsilon$ is an optional nonnegative offset (zero by default). For each eligible representative pair, take the Cartesian product of $\mathcal{C}_q(G;u)$ and $\mathcal{C}_q(G;v)$. At distance zero, $u=v$ and the pair of simplices is unordered, with replacement when self-pairs are enabled. At positive distance, the two simplices may be disjoint or overlap. Since each clique is assigned once, a clique cannot be paired with itself across two different representatives. When self-pairs are disabled, identical cliques are omitted at distance zero.
+where $\varepsilon$ is an optional nonnegative offset (zero by default). For each eligible representative pair, take the Cartesian product of $\mathcal{C}_{q_{\min},q_{\max}}(G;u)$ and $\mathcal{C}_{q_{\min},q_{\max}}(G;v)$. At distance zero, $u=v$ and the pair of simplices is unordered, with replacement when self-pairs are enabled. At positive distance, the two simplices may be disjoint or overlap. Since each clique is assigned once, a clique cannot be paired with itself across two different representatives. When self-pairs are disabled, identical cliques are omitted at distance zero.
 
 The symbolic feature for an occurrence is
 
@@ -34,13 +34,13 @@ $$\phi_G(\{u,v\},\sigma,\tau)=\left(\left[\kappa_G(\sigma,u),\kappa_G(\tau,v)\ri
 
 The unordered pair of representative-marked simplex types is canonicalized by sorting its two members. This makes representative ordering immaterial: swapping $u,v$ and their associated simplices gives the same feature.
 
-For a fixed representative $u$, this construction includes every eligible representative $v$ within the configured distance range and every clique assigned to each representative. In particular, when $u=v$, it pairs the cliques assigned to that single representative.
+For a fixed representative $u$, this construction includes every eligible representative $v$ within the configured distance range and every clique assigned to each representative. In particular, when $u=v$, it pairs the cliques assigned to that single representative. A scalar dimension or distance setting denotes the inclusive interval from zero to that scalar; a two-value tuple denotes its inclusive minimum and maximum.
 
 ## Graph-level feature counts
 
 Let $s\in\{0,1\}$ specify whether self-pairs are included, and let $\preceq$ be the stable ordering of vertices. Define $\mathrm{allowed}_s(\sigma,\tau)$ to be true for distinct simplices, and for identical simplices exactly when $s=1$. The count of feature $\phi$ is
 
-$$c_G(\phi)=\sum_{u\preceq v\in V}\ \sum_{\sigma\in\mathcal{C}_q(G;u)}\ \sum_{\tau\in\mathcal{C}_q(G;v)}\mathbf{1}[L\leq d_G(u,v)+\varepsilon\leq U]\,\mathbf{1}[\phi=\phi_G(\{u,v\},\sigma,\tau)]\,\mathbf{1}[\mathrm{allowed}_s(\sigma,\tau)].$$
+$$c_G(\phi)=\sum_{u\preceq v\in V}\ \sum_{\sigma\in\mathcal{C}_{q_{\min},q_{\max}}(G;u)}\ \sum_{\tau\in\mathcal{C}_{q_{\min},q_{\max}}(G;v)}\mathbf{1}[L\leq d_G(u,v)+\varepsilon\leq U]\,\mathbf{1}[\phi=\phi_G(\{u,v\},\sigma,\tau)]\,\mathbf{1}[\mathrm{allowed}_s(\sigma,\tau)].$$
 
 For $u=v$, the simplex-pair sum is unordered: each pair is counted once, with identical simplices allowed exactly when $s=1$. For $u\ne v$, the representative pair is visited once in a stable vertex order and the full Cartesian product is taken. Repeated feature types arising at different representative pairs add to the same count.
 
