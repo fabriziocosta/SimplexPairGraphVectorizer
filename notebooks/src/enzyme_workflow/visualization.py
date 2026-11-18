@@ -127,6 +127,7 @@ def visualize_proteins_2d(
     *,
     node_label_alphabet: str = "aa20",
     simplex_dimension: int | tuple[int, int] = 3,
+    clique_enumerator: str = "auto",
     pair_distance: int | float | tuple[int | float, int | float] = 4,
     nbits: int = 14,
     include_self: bool = True,
@@ -162,6 +163,7 @@ def visualize_proteins_2d(
         "feature_encoding_version": SimplexPairGraphVectorizer.FEATURE_ENCODING_VERSION,
         "node_label_alphabet": node_label_alphabet,
         "simplex_dimension": simplex_dimension,
+        "clique_enumerator": clique_enumerator,
         "pair_distance": pair_distance,
         "nbits": nbits,
         "include_self": include_self,
@@ -183,6 +185,7 @@ def visualize_proteins_2d(
         labeled_graphs = ProteinLabelGraphicalizer(alphabet=node_label_alphabet).fit_transform(graphs)
         vectorizer = SimplexPairGraphVectorizer(
             simplex_dimension=simplex_dimension,
+            clique_enumerator=clique_enumerator,
             pair_distance=pair_distance,
             nbits=nbits,
             dense=False,

@@ -17,6 +17,8 @@ from scipy.sparse import csr_matrix
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
+FAST_CLIQUE_MAX_SIMPLEX_DIMENSION = 3
+
 
 def _normal_form(value: Any) -> Any:
     """Convert common values to a deterministic JSON-safe form."""
@@ -130,6 +132,71 @@ def _bounded_shortest_path_lengths(
     }
 
 
+def _bounded_cliques(
+    graph: nx.Graph,
+    max_simplex_dimension: int,
+    *,
+    clique_enumerator: str = "auto",
+    node_keys: dict[Any, str] | None = None,
+    ordered_nodes: list[Any] | None = None,
+) -> Iterable[tuple[Any, ...]]:
+    """Enumerate cliques up to a dimension with the selected strategy."""
+    if clique_enumerator not in {"auto", "fast", "generic"}:
+        raise ValueError("clique_enumerator must be 'auto', 'fast', or 'generic'")
+    if max_simplex_dimension < 0:
+        raise ValueError("max_simplex_dimension must be nonnegative")
+    if node_keys is None or ordered_nodes is None:
+        node_keys, ordered_nodes = _node_order(graph, None)
+
+    strategy = clique_enumerator
+    if strategy == "auto":
+        strategy = (
+            "fast"
+            if max_simplex_dimension <= FAST_CLIQUE_MAX_SIMPLEX_DIMENSION
+            else "generic"
+        )
+    if strategy == "fast" and max_simplex_dimension > FAST_CLIQUE_MAX_SIMPLEX_DIMENSION:
+        raise ValueError(
+            "The fast clique enumerator supports simplex dimensions 0 through "
+            f"{FAST_CLIQUE_MAX_SIMPLEX_DIMENSION}; use 'auto' or 'generic' for larger dimensions"
+        )
+
+    if strategy == "generic":
+        max_size = max_simplex_dimension + 1
+        for clique in nx.enumerate_all_cliques(graph):
+            if len(clique) > max_size:
+                break
+            yield tuple(sorted(clique, key=node_keys.__getitem__))
+        return
+
+    node_index = {node: index for index, node in enumerate(ordered_nodes)}
+    higher_neighbor_masks = []
+    for index, node in enumerate(ordered_nodes):
+        mask = 0
+        for neighbor in graph.neighbors(node):
+            neighbor_index = node_index[neighbor]
+            if neighbor_index > index:
+                mask |= 1 << neighbor_index
+        higher_neighbor_masks.append(mask)
+
+    max_size = max_simplex_dimension + 1
+
+    def extend(prefix: tuple[Any, ...], candidates: int) -> Iterable[tuple[Any, ...]]:
+        while candidates:
+            bit = candidates & -candidates
+            candidates ^= bit
+            index = bit.bit_length() - 1
+            clique = prefix + (ordered_nodes[index],)
+            yield clique
+            if len(clique) < max_size:
+                yield from extend(clique, candidates & higher_neighbor_masks[index])
+
+    for index, node in enumerate(ordered_nodes):
+        yield (node,)
+        if max_size > 1:
+            yield from extend((node,), higher_neighbor_masks[index])
+
+
 def _simplex_hash(
     graph: nx.Graph,
     simplex: Sequence[Any],
@@ -195,6 +262,7 @@ def _graph_counts(
     node_label_key: str,
     edge_label_key: str,
     node_key: Callable[[Any], Any] | None,
+    clique_enumerator: str,
 ) -> Counter[str]:
     graph = _validate_graph(graph)
     node_keys, ordered_nodes = _node_order(graph, node_key)
@@ -202,15 +270,17 @@ def _graph_counts(
         return Counter()
 
     min_size = min_simplex_dimension + 1
-    max_size = max_simplex_dimension + 1
     simplices: list[tuple[Any, ...]] = []
-    # NetworkX emits cliques in nondecreasing size, so stop at max dimension.
-    for clique in nx.enumerate_all_cliques(graph):
-        if len(clique) > max_size:
-            break
+    for clique in _bounded_cliques(
+        graph,
+        max_simplex_dimension,
+        clique_enumerator=clique_enumerator,
+        node_keys=node_keys,
+        ordered_nodes=ordered_nodes,
+    ):
         if len(clique) < min_size:
             continue
-        simplices.append(tuple(sorted(clique, key=node_keys.__getitem__)))
+        simplices.append(clique)
 
     by_representative: dict[Any, list[int]] = {node: [] for node in graph.nodes}
     for simplex_index, simplex in enumerate(simplices):
@@ -298,6 +368,10 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
 
     ``distance_jitter="auto"`` applies no jitter because shortest-path
     distances are discrete. A numeric value is added before distance filtering.
+
+    ``clique_enumerator="auto"`` uses bitset intersections for dimensions
+    0–3 and NetworkX's generic enumerator for larger dimensions. Choose
+    ``"fast"`` or ``"generic"`` to select an implementation explicitly.
     """
 
     FEATURE_ENCODING_VERSION = 5
@@ -315,6 +389,7 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
         cache_graphs: bool = False,
         n_jobs: int | None = -1,
         progress: bool = False,
+        clique_enumerator: str = "auto",
         node_label_key: str = "label",
         edge_label_key: str = "label",
         node_key: Callable[[Any], Any] | None = None,
@@ -333,6 +408,7 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
         self.cache_graphs = cache_graphs
         self.n_jobs = n_jobs
         self.progress = progress
+        self.clique_enumerator = clique_enumerator
         self.node_label_key = node_label_key
         self.edge_label_key = edge_label_key
         self.node_key = node_key
@@ -358,7 +434,17 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
         )
 
     def _validate_parameters(self) -> None:
-        self._configured_ranges()
+        (_, max_dimension), _ = self._configured_ranges()
+        if self.clique_enumerator not in {"auto", "fast", "generic"}:
+            raise ValueError("clique_enumerator must be 'auto', 'fast', or 'generic'")
+        if (
+            self.clique_enumerator == "fast"
+            and max_dimension > FAST_CLIQUE_MAX_SIMPLEX_DIMENSION
+        ):
+            raise ValueError(
+                "The fast clique enumerator supports simplex dimensions 0 through "
+                f"{FAST_CLIQUE_MAX_SIMPLEX_DIMENSION}; use 'auto' or 'generic' for larger dimensions"
+            )
         if not isinstance(self.nbits, int) or not 1 <= self.nbits <= 30:
             raise ValueError("nbits must be an integer between 1 and 30")
         if self.distance_mode != "representative":
@@ -388,6 +474,7 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
             node_label_key=self.node_label_key,
             edge_label_key=self.edge_label_key,
             node_key=self.node_key,
+            clique_enumerator=self.clique_enumerator,
         )
         hashed_counts: Counter[int] = Counter()
         for feature, count in feature_counts.items():

@@ -12,51 +12,16 @@ import networkx as nx
 import pandas as pd
 
 from enzyme_workflow.common import active_manifest
-from simplex_pair_vectorizer.vectorizer import _node_order
+from simplex_pair_vectorizer.vectorizer import _bounded_cliques
 
 
 def _networkx_cliques(graph: nx.Graph, max_dimension: int) -> list[tuple[Any, ...]]:
-    node_keys, _ = _node_order(graph, None)
-    max_size = max_dimension + 1
-    cliques = []
-    for clique in nx.enumerate_all_cliques(graph):
-        if len(clique) > max_size:
-            break
-        cliques.append(tuple(sorted(clique, key=node_keys.__getitem__)))
-    return cliques
+    return list(_bounded_cliques(graph, max_dimension, clique_enumerator="generic"))
 
 
 def _intersection_cliques(graph: nx.Graph, max_dimension: int) -> list[tuple[Any, ...]]:
-    """Enumerate each bounded clique once using ordered adjacency bitsets."""
-    _, ordered_nodes = _node_order(graph, None)
-    node_index = {node: index for index, node in enumerate(ordered_nodes)}
-    higher_neighbor_masks = []
-    for index, node in enumerate(ordered_nodes):
-        mask = 0
-        for neighbor in graph.neighbors(node):
-            neighbor_index = node_index[neighbor]
-            if neighbor_index > index:
-                mask |= 1 << neighbor_index
-        higher_neighbor_masks.append(mask)
-
-    max_size = max_dimension + 1
-    cliques: list[tuple[Any, ...]] = []
-
-    def extend(prefix: tuple[Any, ...], candidates: int) -> None:
-        while candidates:
-            bit = candidates & -candidates
-            candidates ^= bit
-            index = bit.bit_length() - 1
-            clique = prefix + (ordered_nodes[index],)
-            cliques.append(clique)
-            if len(clique) < max_size:
-                extend(clique, candidates & higher_neighbor_masks[index])
-
-    for index, node in enumerate(ordered_nodes):
-        cliques.append((node,))
-        if max_size > 1:
-            extend((node,), higher_neighbor_masks[index])
-    return cliques
+    """Enumerate each bounded clique once using the vectorizer's fast path."""
+    return list(_bounded_cliques(graph, max_dimension, clique_enumerator="fast"))
 
 
 def _sample_graph_rows(project_root: Path, sample_count: int) -> pd.DataFrame:

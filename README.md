@@ -28,7 +28,7 @@ features = vectorizer.fit_transform([graph])  # scipy CSR matrix
 
 ## Enzyme classification notebooks
 
-The `notebooks/` workflow has four stages:
+The `notebooks/` workflow has six stages:
 
 1. `01_select_ec_proteins.ipynb` lists PDB-linked EC classes at a chosen level
    and selects up to a configured number of UniProt proteins per class.
@@ -42,6 +42,8 @@ The `notebooks/` workflow has four stages:
    visualizes them with the sibling `IteratedMinimumSpanningTreeEmbedder`.
 5. `05_explore_protein_simplex_pair.ipynb` opens a rotatable 3D protein graph
    and interactively highlights a randomly sampled representative-pair feature.
+6. `06_benchmark_clique_enumeration.ipynb` compares the fast bounded clique
+   enumerator with NetworkX's generic enumerator on cached protein graphs.
 
 Notebook 03 defaults to XGBoost's parallel histogram classifier. It consumes
 the vectorizer's sparse CSR matrix directly; `N_JOBS = -1` uses all available
@@ -128,6 +130,15 @@ occurrence counts, and self-pairs enabled. The enzyme notebooks currently set `N
 both classification and visualization. Node and edge labels are read from
 attributes named label; change node_label_key or edge_label_key to use other
 attributes.
+
+Clique enumeration defaults to `clique_enumerator="auto"`: dimensions 0–3
+use bitset adjacency intersections, while larger maximum dimensions use
+NetworkX's generic all-clique enumerator. Set `clique_enumerator="fast"` or
+`"generic"` to choose explicitly. The fast implementation currently supports
+maximum simplex dimension 3. Both methods produce the same clique set; this
+setting changes the computation strategy only. Notebooks 03–05 expose it as
+`CLIQUE_ENUMERATOR`. See [the clique enumeration notes](docs/clique-enumeration.md)
+for the algorithm details and measured protein-graph timings.
 
 The lowest stable node key selects each clique's unique representative. By
 default, the node itself is the key. Supply node_key= for custom node objects

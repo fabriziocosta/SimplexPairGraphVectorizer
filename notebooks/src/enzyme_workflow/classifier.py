@@ -359,6 +359,7 @@ def run_classifier(
     node_label_alphabet: str = "aa20",
     base_estimator_kind: str = "linear_sgd",
     simplex_dimension: int | tuple[int, int] = 3,
+    clique_enumerator: str = "auto",
     pair_distance: int | float | tuple[int | float, int | float] = 4,
     nbits: int = 14,
     vectorizer_progress: bool = True,
@@ -444,6 +445,7 @@ def run_classifier(
             "simplex_pair",
             SimplexPairGraphVectorizer(
                 simplex_dimension=simplex_dimension,
+                clique_enumerator=clique_enumerator,
                 pair_distance=pair_distance,
                 nbits=nbits,
                 dense=False,
@@ -776,6 +778,7 @@ def run_classifier(
         "random_state": random_state,
         "node_label_alphabet": node_label_alphabet,
         "simplex_dimension": simplex_dimension,
+        "clique_enumerator": clique_enumerator,
         "pair_distance": pair_distance,
         "nbits": nbits,
         "feature_encoding_version": SimplexPairGraphVectorizer.FEATURE_ENCODING_VERSION,

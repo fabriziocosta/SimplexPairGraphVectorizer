@@ -96,19 +96,20 @@ def load_protein_geometry(
 
 
 def cliques_by_representative(
-    graph: nx.Graph, max_simplex_dimension: int
+    graph: nx.Graph,
+    max_simplex_dimension: int,
+    *,
+    clique_enumerator: str = "auto",
 ) -> dict[Any, list[tuple[Any, ...]]]:
     """Assign each simplex once to its lowest-key vertex."""
     if max_simplex_dimension < 0:
         raise ValueError("max_simplex_dimension must be nonnegative")
-    from simplex_pair_vectorizer.vectorizer import _node_order
+    from simplex_pair_vectorizer.vectorizer import _bounded_cliques
 
-    node_keys, _ = _node_order(graph, None)
     by_representative: dict[Any, list[tuple[Any, ...]]] = {node: [] for node in graph.nodes}
-    for clique in nx.enumerate_all_cliques(graph):
-        if len(clique) > max_simplex_dimension + 1:
-            break
-        simplex = tuple(sorted(clique, key=node_keys.__getitem__))
+    for simplex in _bounded_cliques(
+        graph, max_simplex_dimension, clique_enumerator=clique_enumerator
+    ):
         by_representative[simplex[0]].append(simplex)
     return {
         representative: simplices
@@ -125,6 +126,7 @@ def sample_simplex_pair(
     min_distance: int,
     max_distance: int,
     rng: random.Random,
+    clique_enumerator: str = "auto",
 ) -> SimplexPair | None:
     """Sample a representative pair and assigned cliques inside the ranges."""
     from simplex_pair_vectorizer.vectorizer import _bounded_shortest_path_lengths
@@ -133,7 +135,11 @@ def sample_simplex_pair(
         raise ValueError("distance range must satisfy 0 <= min_distance <= max_distance")
     if min_simplex_dimension < 0 or max_simplex_dimension < min_simplex_dimension:
         raise ValueError("simplex dimension range must satisfy 0 <= min <= max")
-    by_representative = cliques_by_representative(graph, max_simplex_dimension)
+    by_representative = cliques_by_representative(
+        graph,
+        max_simplex_dimension,
+        clique_enumerator=clique_enumerator,
+    )
     by_representative = {
         representative: [
             simplex
@@ -369,6 +375,7 @@ def display_feature_explorer(
     *,
     max_representative_distance: int = 6,
     max_simplex_dimension: int = 3,
+    clique_enumerator: str = "auto",
 ) -> None:
     """Display the widget-driven protein and representative-paired simplex explorer."""
     import ipywidgets as widgets
@@ -451,6 +458,7 @@ def display_feature_explorer(
             min_distance=distance_slider.value[0],
             max_distance=distance_slider.value[1],
             rng=rng,
+            clique_enumerator=clique_enumerator,
         )
         if state["feature"] is None:
             render(
