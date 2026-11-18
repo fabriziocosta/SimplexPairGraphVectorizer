@@ -40,6 +40,8 @@ The `notebooks/` workflow has four stages:
    precision–recall plots.
 4. `04_visualize_ec_proteins_2d.ipynb` vectorizes the same cached graphs and
    visualizes them with the sibling `IteratedMinimumSpanningTreeEmbedder`.
+5. `05_explore_protein_simplex_pair.ipynb` opens a rotatable 3D protein graph
+   and interactively highlights a randomly sampled rooted simplex-pair feature.
 
 Notebook 03 defaults to XGBoost's parallel histogram classifier. It consumes
 the vectorizer's sparse CSR matrix directly; `N_JOBS = -1` uses all available
