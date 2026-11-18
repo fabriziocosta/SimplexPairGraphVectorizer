@@ -514,9 +514,16 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
                 self._graph_cache_[id(graph)] = (graph, self._counts(graph))
         return self
 
-    def transform(self, X: Iterable[nx.Graph]) -> csr_matrix | np.ndarray:
-        """Transform graphs into a CSR matrix, or dense array if requested."""
+    def transform(
+        self,
+        X: Iterable[nx.Graph],
+        *,
+        progress_bar: Any | None = None,
+    ) -> csr_matrix | np.ndarray:
+        """Transform graphs into a matrix, updating an optional caller-owned bar."""
         check_is_fitted(self, "n_features_out_")
+        if progress_bar is not None and not callable(getattr(progress_bar, "update", None)):
+            raise TypeError("progress_bar must provide an update(n) method")
         graphs = list(X)
 
         def counts_for(graph: nx.Graph) -> Counter[int]:
@@ -532,11 +539,15 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
 
         if self.cache_graphs or self.n_jobs == 1 or len(graphs) < 2:
             graph_iterable = graphs
-            if self.progress:
+            if self.progress and progress_bar is None:
                 from tqdm.auto import tqdm
 
                 graph_iterable = tqdm(graphs, desc="Vectorizing protein graphs", unit="protein")
-            rows = [counts_for(graph) for graph in graph_iterable]
+            rows = []
+            for graph in graph_iterable:
+                rows.append(counts_for(graph))
+                if progress_bar is not None:
+                    progress_bar.update(1)
         else:
             # Feature extraction is dominated by Python and NetworkX work, so
             # threads contend on the GIL. Process workers let separate proteins
@@ -551,7 +562,7 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
                 delayed(_indexed_graph_counts)(self, index, graph)
                 for index, graph in enumerate(graphs)
             )
-            if self.progress:
+            if self.progress and progress_bar is None:
                 from tqdm.auto import tqdm
 
                 results = tqdm(
@@ -563,6 +574,8 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
             rows = [None] * len(graphs)
             for index, row in results:
                 rows[index] = row
+                if progress_bar is not None:
+                    progress_bar.update(1)
 
         data: list[int] = []
         indices: list[int] = []

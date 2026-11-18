@@ -206,34 +206,37 @@ def visualize_proteins_2d(
             dense=False,
             include_self=include_self,
             n_jobs=-1,
-            progress=True,
+            progress=False,
         )
         vectorizer.fit([])
         graphicalizer = ProteinLabelGraphicalizer(alphabet=node_label_alphabet)
         feature_batches = []
-        batch_count = (len(dataset) + graph_batch_size - 1) // graph_batch_size
         with tqdm(
             total=len(dataset),
             desc="Loading protein graphs",
             unit="protein",
-        ) as loading_progress:
-            for batch_index, batch_start in enumerate(
-                range(0, len(dataset), graph_batch_size), start=1
-            ):
+            position=0,
+        ) as loading_progress, tqdm(
+            total=len(dataset),
+            desc="Vectorizing protein graphs",
+            unit="protein",
+            position=1,
+        ) as vectorizing_progress:
+            for batch_start in range(0, len(dataset), graph_batch_size):
                 batch_end = min(batch_start + graph_batch_size, len(dataset))
                 graphs = []
                 for graph_path in dataset["graph_path"].iloc[batch_start:batch_end]:
                     graphs.append(read_graph_pickle(graph_path))
                     loading_progress.update(1)
 
-                print(
-                    f"Vectorizing batch {batch_index:,}/{batch_count:,} "
-                    f"({len(graphs):,} proteins)",
-                    flush=True,
-                )
                 labeled_graphs = graphicalizer.transform(graphs)
                 del graphs
-                feature_batches.append(vectorizer.transform(labeled_graphs))
+                feature_batches.append(
+                    vectorizer.transform(
+                        labeled_graphs,
+                        progress_bar=vectorizing_progress,
+                    )
+                )
                 del labeled_graphs
                 gc.collect()
 
