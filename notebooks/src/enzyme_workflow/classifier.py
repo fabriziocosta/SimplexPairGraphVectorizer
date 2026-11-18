@@ -302,6 +302,7 @@ def run_classifier(
     x_test = [read_graph_pickle(graph_paths[index]) for index in test_idx]
     print(f"Predicting {len(x_test):,} test proteins")
     model_predictions = model.predict(x_test)
+    del x_test
     if base_estimator_kind == "xgboost":
         y_pred = np.asarray(xgb_class_labels, dtype=object)[model_predictions.astype(int)]
     else:

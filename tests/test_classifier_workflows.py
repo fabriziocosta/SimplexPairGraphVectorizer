@@ -21,7 +21,11 @@ class _ClassifierWithCallbacks:
 
 
 def test_detaching_training_callback_makes_pipeline_serializable(tmp_path):
+    class LocalTqdmCallback:
+        pass
+
     model = Pipeline([("classifier", _ClassifierWithCallbacks())])
+    model.named_steps["classifier"].callbacks = [LocalTqdmCallback()]
     _detach_fit_callbacks(model)
 
     assert model.named_steps["classifier"].callbacks is None
