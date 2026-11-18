@@ -40,6 +40,10 @@ The `notebooks/` workflow has four stages:
 4. `04_visualize_ec_proteins_2d.ipynb` vectorizes the same cached graphs and
    visualizes them with the sibling `IteratedMinimumSpanningTreeEmbedder`.
 
+Notebook 03 defaults to XGBoost's parallel histogram classifier. It consumes
+the vectorizer's sparse CSR matrix directly; `N_JOBS = -1` uses all available
+CPU cores, and inverse-frequency sample weights balance the EC classes.
+
 Install the experiment dependencies and sibling protein graphicalizer with:
 
 ```bash

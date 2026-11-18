@@ -65,26 +65,25 @@ def _node_order(
     return keys, sorted(graph.nodes, key=keys.__getitem__)
 
 
-def _simplex_signature(
+def _simplex_hash(
     graph: nx.Graph,
     simplex: Sequence[Any],
-    root: Any,
-    node_keys: dict[Any, str],
     node_label_key: str,
     edge_label_key: str,
-) -> str:
-    ordered = sorted(simplex, key=node_keys.__getitem__)
-    node_labels = [
-        [int(node == root), _canonical_json(graph.nodes[node].get(node_label_key))]
-        for node in ordered
-    ]
+) -> bytes:
+    """Hash a simplex's labels and edges once, independent of its root."""
+    ordered = list(simplex)
+    node_labels = [_canonical_json(graph.nodes[node].get(node_label_key)) for node in ordered]
     edge_labels = []
     for i, left in enumerate(ordered):
         for j in range(i + 1, len(ordered)):
             right = ordered[j]
             edge_data = graph.get_edge_data(left, right, default={})
             edge_labels.append([i, j, _canonical_json(edge_data.get(edge_label_key))])
-    return _canonical_json({"nodes": node_labels, "edges": edge_labels})
+    signature = _canonical_json({"nodes": node_labels, "edges": edge_labels})
+    return hashlib.blake2b(
+        signature.encode("utf-8"), digest_size=16, person=b"simplexatom"
+    ).digest()
 
 
 def _graph_counts(
@@ -117,19 +116,26 @@ def _graph_counts(
         for node in simplex:
             by_root[node].append(simplex_index)
 
-    signatures: dict[tuple[int, Any], str] = {}
-    for root in ordered_nodes:
-        for simplex_index in by_root[root]:
-            signatures[(simplex_index, root)] = _simplex_signature(
-                graph,
-                simplices[simplex_index],
-                root,
-                node_keys,
-                node_label_key,
-                edge_label_key,
-            )
-
     jitter = 0.0 if distance_jitter in (None, "auto") else float(distance_jitter)
+    max_hops = math.floor(max_distance - jitter)
+    if max_hops < 0:
+        return Counter()
+
+    simplex_hashes = [
+        _simplex_hash(graph, simplex, node_label_key, edge_label_key)
+        for simplex in simplices
+    ]
+    root_positions = [
+        {node: position for position, node in enumerate(simplex)}
+        for simplex in simplices
+    ]
+
+    representatives = {simplex[0] for simplex in simplices}
+    # Reuse one bounded BFS result for every simplex pair that shares a root.
+    distances = {
+        source: nx.single_source_shortest_path_length(graph, source, cutoff=max_hops)
+        for source in representatives
+    }
     counts: Counter[str] = Counter()
     # The common root is part of the feature. A pair is symmetric; each
     # simplex pair is visited once for each possible common root.
@@ -143,17 +149,34 @@ def _graph_counts(
                 right_simplex = simplices[right_index]
                 left_rep = left_simplex[0]
                 right_rep = right_simplex[0]
-                distance = float(nx.shortest_path_length(graph, left_rep, right_rep)) + jitter
+                path_length = distances[left_rep].get(right_rep)
+                if path_length is None:
+                    continue
+                distance = float(path_length) + jitter
                 if distance < min_distance or distance > max_distance:
                     continue
-                first, second = sorted((signatures[(left_index, root)], signatures[(right_index, root)]))
-                counts[_canonical_json(["rooted_simplex_pair", first, second, distance])] += 1
+                first, second = sorted((
+                    (simplex_hashes[left_index], root_positions[left_index][root]),
+                    (simplex_hashes[right_index], root_positions[right_index][root]),
+                ))
+                feature = (
+                    f"rooted_simplex_pair_v2:{first[0].hex()}:{first[1]}:"
+                    f"{second[0].hex()}:{second[1]}:{distance.hex()}"
+                )
+                counts[feature] += 1
     return counts
 
 
 def _hash_index(feature: str, n_features: int) -> int:
     digest = hashlib.blake2b(feature.encode("utf-8"), digest_size=8, person=b"simplexpair").digest()
     return int.from_bytes(digest, "little", signed=False) % n_features
+
+
+def _indexed_graph_counts(
+    vectorizer: "SimplexPairGraphVectorizer", index: int, graph: nx.Graph
+) -> tuple[int, Counter[str]]:
+    """Return a graph's input index with its counts for unordered workers."""
+    return index, vectorizer._counts(graph)
 
 
 class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
@@ -170,6 +193,8 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
     distances are discrete. A numeric value is added before distance filtering.
     """
 
+    FEATURE_ENCODING_VERSION = 2
+
     def __init__(
         self,
         max_simplex_dimension: int = 3,
@@ -183,6 +208,7 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
         include_self: bool = True,
         cache_graphs: bool = False,
         n_jobs: int | None = -1,
+        progress: bool = False,
         node_label_key: str = "label",
         edge_label_key: str = "label",
         node_key: Callable[[Any], Any] | None = None,
@@ -198,6 +224,7 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
         self.include_self = include_self
         self.cache_graphs = cache_graphs
         self.n_jobs = n_jobs
+        self.progress = progress
         self.node_label_key = node_label_key
         self.edge_label_key = edge_label_key
         self.node_key = node_key
@@ -225,6 +252,8 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
                 raise ValueError("distance_jitter must be 'auto', None, or a number") from exc
             if not math.isfinite(jitter) or jitter < 0:
                 raise ValueError("numeric distance_jitter must be finite and nonnegative")
+        if not isinstance(self.progress, (bool, np.bool_)):
+            raise ValueError("progress must be a boolean")
 
     def _counts(self, graph: nx.Graph) -> Counter[str]:
         return _graph_counts(
@@ -271,11 +300,36 @@ class SimplexPairGraphVectorizer(TransformerMixin, BaseEstimator):
             return self._counts(graph)
 
         if self.cache_graphs or self.n_jobs == 1 or len(graphs) < 2:
-            rows = [counts_for(graph) for graph in graphs]
+            graph_iterable = graphs
+            if self.progress:
+                from tqdm.auto import tqdm
+
+                graph_iterable = tqdm(graphs, desc="Vectorizing protein graphs", unit="protein")
+            rows = [counts_for(graph) for graph in graph_iterable]
         else:
-            rows = Parallel(n_jobs=self.n_jobs, prefer="threads")(
-                delayed(self._counts)(graph) for graph in graphs
+            # Feature extraction is dominated by Python and NetworkX work, so
+            # threads contend on the GIL. Process workers let separate proteins
+            # be counted on separate CPU cores.
+            results = Parallel(
+                n_jobs=self.n_jobs,
+                prefer="processes",
+                return_as="generator_unordered",
+            )(
+                delayed(_indexed_graph_counts)(self, index, graph)
+                for index, graph in enumerate(graphs)
             )
+            if self.progress:
+                from tqdm.auto import tqdm
+
+                results = tqdm(
+                    results,
+                    total=len(graphs),
+                    desc="Vectorizing protein graphs",
+                    unit="protein",
+                )
+            rows = [None] * len(graphs)
+            for index, row in results:
+                rows[index] = row
 
         data: list[int] = []
         indices: list[int] = []

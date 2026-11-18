@@ -64,6 +64,8 @@ def run_classifier(
     min_pair_distance: int = 0,
     max_pair_distance: int = 4,
     nbits: int = 14,
+    vectorizer_progress: bool = True,
+    n_jobs: int | None = -1,
 ) -> ClassificationResult:
     """Load graph caches, split by UniProt accession, fit, and save a run."""
     root = add_project_sources(project_root)
@@ -131,7 +133,8 @@ def run_classifier(
                 nbits=nbits,
                 dense=False,
                 include_self=True,
-                n_jobs=-1,
+                n_jobs=n_jobs,
+                progress=vectorizer_progress,
             ),
         ),
     ]
@@ -148,9 +151,43 @@ def run_classifier(
                     class_weight="balanced",
                     average=True,
                     random_state=random_state,
+                    n_jobs=n_jobs,
                 ),
             ),
         ])
+    elif base_estimator_kind == "xgboost":
+        try:
+            from xgboost import XGBClassifier
+        except ImportError as exc:
+            raise ImportError(
+                "XGBoost classification requires xgboost; install the protein extra with "
+                "`pip install -e '.[protein]'`."
+            ) from exc
+
+        xgb_class_labels = sorted(set(y))
+        xgb_class_to_id = {label: index for index, label in enumerate(xgb_class_labels)}
+        y_train_fit = np.asarray(
+            [xgb_class_to_id[label] for label in y[train_idx]], dtype=np.int32
+        )
+        class_frequencies = np.bincount(y_train_fit, minlength=len(xgb_class_labels))
+        xgb_sample_weight = len(y_train_fit) / (len(xgb_class_labels) * class_frequencies[y_train_fit])
+        steps.append(
+            (
+                "classifier",
+                XGBClassifier(
+                    n_estimators=300,
+                    max_depth=4,
+                    learning_rate=0.05,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    reg_lambda=1.0,
+                    tree_method="hist",
+                    n_jobs=n_jobs,
+                    random_state=random_state,
+                    verbosity=0,
+                ),
+            )
+        )
     elif base_estimator_kind == "random_forest":
         steps.append(
             (
@@ -161,7 +198,7 @@ def run_classifier(
                     min_samples_leaf=2,
                     class_weight="balanced_subsample",
                     random_state=random_state,
-                    n_jobs=-1,
+                    n_jobs=n_jobs,
                 ),
             )
         )
@@ -172,8 +209,21 @@ def run_classifier(
     x_train = [graphs[index] for index in train_idx]
     x_test = [graphs[index] for index in test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
-    model.fit(x_train, y_train)
-    y_pred = model.predict(x_test)
+    print(f"Fitting classifier on {len(x_train):,} training proteins")
+    fit_parameters = {}
+    if base_estimator_kind == "xgboost":
+        fit_parameters = {
+            "classifier__sample_weight": xgb_sample_weight,
+        }
+        model.fit(x_train, y_train_fit, **fit_parameters)
+    else:
+        model.fit(x_train, y_train)
+    print(f"Predicting {len(x_test):,} test proteins")
+    model_predictions = model.predict(x_test)
+    if base_estimator_kind == "xgboost":
+        y_pred = np.asarray(xgb_class_labels, dtype=object)[model_predictions.astype(int)]
+    else:
+        y_pred = model_predictions
     labels = sorted(set(y))
     report = pd.DataFrame(
         classification_report(y_test, y_pred, labels=labels, output_dict=True, zero_division=0)
@@ -245,6 +295,8 @@ def run_classifier(
     )
 
     model_classes = list(model.named_steps["classifier"].classes_)
+    if base_estimator_kind == "xgboost":
+        model_classes = [xgb_class_labels[int(class_id)] for class_id in model_classes]
     if hasattr(model, "decision_function"):
         raw_scores = np.asarray(model.decision_function(x_test))
     else:
@@ -346,6 +398,7 @@ def run_classifier(
         "min_pair_distance": min_pair_distance,
         "max_pair_distance": max_pair_distance,
         "nbits": nbits,
+        "feature_encoding_version": SimplexPairGraphVectorizer.FEATURE_ENCODING_VERSION,
         "base_estimator_kind": base_estimator_kind,
         "train_samples": int(len(train_idx)),
         "test_samples": int(len(test_idx)),

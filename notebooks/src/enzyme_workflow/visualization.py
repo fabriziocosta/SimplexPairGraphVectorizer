@@ -160,6 +160,7 @@ def visualize_proteins_2d(
         parameters.update(imste_parameters)
 
     vectorizer_settings = {
+        "feature_encoding_version": SimplexPairGraphVectorizer.FEATURE_ENCODING_VERSION,
         "node_label_alphabet": node_label_alphabet,
         "max_simplex_dimension": max_simplex_dimension,
         "min_pair_distance": min_pair_distance,
